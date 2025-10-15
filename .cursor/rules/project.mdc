@@ -1,0 +1,6 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+We are in a uv environment. We are using ruff for linting and formatting. We are using mypy for type checking. We are using a modern version of Python. We are using pytest for testing.
