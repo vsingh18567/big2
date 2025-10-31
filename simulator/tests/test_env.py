@@ -147,7 +147,7 @@ class TestEnv:
         assert env.passes_in_row == 0  # Reset
         assert env.trick_pile is None  # Trick cleared
 
-        last_play_portion = obs[13:65]  # type: ignore
+        last_play_portion = obs[13:65]  # type: ignore[unreachable]
         assert np.sum(last_play_portion) == 0
 
     def test_legal_candidates_fresh_trick(self):
@@ -310,14 +310,13 @@ class TestEnv:
         assert action is not None
         assert action.type == STRAIGHT
 
-        if action.type == STRAIGHT:
-            obs, reward, done, info = env.step(action)
+        obs, reward, done, info = env.step(action)
 
-            # Check the straight was played
-            assert env.trick_pile is not None
-            assert env.trick_pile.type == STRAIGHT  # type: ignore
-            assert len(env.trick_pile.cards) == 5
-            assert sorted(env.trick_pile.cards) == sorted(straight_cards)
+        # Check the straight was played
+        assert env.trick_pile is not None
+        assert env.trick_pile.type == STRAIGHT  # type: ignore[unreachable]
+        assert len(env.trick_pile.cards) == 5
+        assert sorted(env.trick_pile.cards) == sorted(straight_cards)
 
     def test_opponent_card_counts_in_observation(self):
         """Test that opponent card counts are correctly tracked in observation"""

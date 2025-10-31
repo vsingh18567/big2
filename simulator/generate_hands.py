@@ -2,7 +2,7 @@
 
 import itertools
 
-from .cards import (
+from simulator.cards import (
     FLUSH,
     FOUR_KIND,
     FULLHOUSE,
