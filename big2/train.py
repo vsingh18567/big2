@@ -236,16 +236,10 @@ def train_selfplay(
                     f"[Episode {ep}] loss={loss.item():.3f} pol={policy_loss.item():.3f} "
                     f"val={value_loss.item():.3f} ent={entropy_term.item():.3f} steps/player~{avg_len:.1f}\n"
                 )
-            else:
                 # Update baseline checkpoint to current policy
-                baseline_policy = MLPPolicy(device=device).to(device)
-                baseline_policy.load_state_dict(policy.state_dict())
-                baseline_policy.eval()
-                print(
-                    f"[Episode {ep}] loss={loss.item():.3f} pol={policy_loss.item():.3f} "
-                    f"val={value_loss.item():.3f} ent={entropy_term.item():.3f} steps/player~{avg_len:.1f}"
-                )
-                print(f"[Episode {ep}] Saving baseline checkpoint (no evaluation yet)\n")
+            baseline_policy = MLPPolicy(device=device).to(device)
+            baseline_policy.load_state_dict(policy.state_dict())
+            baseline_policy.eval()
 
     return policy, loss_history, policy_loss_history, value_loss_history, entropy_history, eval_episodes, win_rates
 
