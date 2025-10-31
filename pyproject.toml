@@ -3,6 +3,7 @@ name = "simulator"
 version = "0.1.0"
 description = "Big 2 Card Game Simulator"
 authors = []
+requires-python = ">=3.11"
 dependencies = [
     "typing-extensions>=4.9.0",
     "pytest>=8.0.0",
@@ -17,7 +18,9 @@ build-backend = "hatchling.build"
 
 [tool.ruff]
 target-version = "py311"
-line-length = 88
+line-length = 120
+
+[tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -39,12 +42,11 @@ line-ending = "auto"
 python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
 disallow_untyped_decorators = true
 no_implicit_optional = true
+check_untyped_defs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
+explicit_package_bases = true

@@ -31,6 +31,12 @@ source .venv/bin/activate  # On Unix/macOS
 uv pip install ruff mypy hatchling typing-extensions
 ```
 
+3. Install pre-commit hooks (optional but recommended):
+```bash
+uv pip install pre-commit
+pre-commit install
+```
+
 ### Development Commands
 
 - Run type checking:
@@ -47,3 +53,19 @@ ruff check simulator
 ```bash
 ruff format simulator
 ```
+
+### Pre-commit Hooks
+
+This project uses pre-commit hooks to automatically run ruff and mypy before each commit. The hooks will:
+- Run `ruff check --fix` to automatically fix linting issues
+- Run `ruff format` to format code
+- Run `mypy` for type checking
+
+To run pre-commit hooks manually:
+```bash
+pre-commit run --all-files
+```
+
+### Continuous Integration
+
+GitHub Actions automatically runs linting, formatting checks, type checking, and tests on all pushes and pull requests to the main branch.
