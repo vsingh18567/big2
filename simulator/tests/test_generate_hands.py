@@ -1,17 +1,19 @@
-from simulator.generate_hands import (
-    generate_singles, 
-    generate_pairs, 
-    generate_triples, 
-    generate_straights, 
-    generate_flushes, 
-    generate_fullhouses, 
-    generate_fourkind, 
-    generate_straightflushes
-)
 from simulator.cards import sort_cards
+from simulator.generate_hands import (
+    generate_flushes,
+    generate_fourkind,
+    generate_fullhouses,
+    generate_pairs,
+    generate_singles,
+    generate_straightflushes,
+    generate_straights,
+    generate_triples,
+)
+
 
 class TestGenerateHands:
     """Tests for generate_hands function"""
+
     def test_generate_hands(self):
         # Full 13-card hand
         hand = [3, 36, 28, 8, 32, 27, 51, 22, 41, 18, 29, 49, 45]
