@@ -119,6 +119,7 @@ class Big2Env:
         player_hand = self.hands[self.current_player]
         reward = 0
         if action.type == PASS:
+            reward -= 0.5
             self.passes_in_row += 1
             # If this player was the 3rd pass in a row, the next player has control
             if self.passes_in_row >= self.n_players - 1:
@@ -126,6 +127,9 @@ class Big2Env:
                 self.passes_in_row = 0
 
         else:
+            # Previous trick played by this player won them the trick, reward them now
+            if self.trick_pile is None and len(player_hand) < 13:
+                reward += 0.05
             for c in action.cards:
                 player_hand.remove(c)
                 self.seen[c] = 1
@@ -134,8 +138,8 @@ class Big2Env:
             if len(player_hand) == 0:
                 self.done = True
                 self.winner = self.current_player
-                reward = 1
-
+                reward += 1
+        
         # If not done, advance the current player
         if not self.done:
             self.current_player = (self.current_player + 1) % self.n_players

@@ -7,9 +7,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn, optim
 
-from .nn import MLPPolicy, combo_to_action_vector
-from .simulator.cards import PASS, Combo, card_name
-from .simulator.env import Big2Env
+from nn import MLPPolicy, combo_to_action_vector
+from simulator.cards import PASS, Combo, card_name
+from simulator.env import Big2Env
+from tqdm import tqdm
 
 
 @dataclass
@@ -18,6 +19,7 @@ class StepRecord:
     entropy: torch.Tensor
     value: torch.Tensor
     reward: float
+    action: str | None = None
 
 
 def select_action(
@@ -41,7 +43,6 @@ def select_action(
 
 def episode(env: Big2Env, policy: MLPPolicy, device="cpu"):
     # Records per player
-    print("NEW EPISODE")
     traj: dict[int, list[StepRecord]] = {p: [] for p in range(4)}
     state = env.reset()
     while True:
@@ -52,31 +53,30 @@ def episode(env: Big2Env, policy: MLPPolicy, device="cpu"):
             candidates = [Combo(PASS, [], ())]
         action, logprob, entropy, value = select_action(policy, state, candidates)
 
-        # Debug printing disabled
-        # hand_cards = env.hands[p]
-        # hand_str = " ".join([card_name(c) for c in sorted(hand_cards)])
-        # if action.type == PASS:
-        #     action_str = "PASS"
-        # else:
-        #     action_str = " ".join([card_name(c) for c in action.cards])
-        # print(f"Player {p} | Hand: [{hand_str}] | Action: {action.type} {action_str}")
+        hand_cards = env.hands[p]
+        hand_str = " ".join([card_name(c) for c in sorted(hand_cards)])
+        if action.type == PASS:
+            action_str = "PASS"
+        else:
+            action_str = " ".join([card_name(c) for c in action.cards])
 
         next_state, reward, done, _ = env.step(action)
         # Store step
-        traj[p].append(StepRecord(logprob=logprob, entropy=entropy, value=value, reward=0.0))
+        traj[p].append(StepRecord(logprob=logprob, entropy=entropy, value=value, reward=reward, action=action_str))
         # Assign terminal rewards at the end
         if done:
             winner = env.winner
             for q in range(4):
-                final_r = 1.0 if q == winner else -1.0
+                # If winner: reward is the number of cards in the other players' hands
+                # If loser: reward is the negative number of cards in our hand
+                final_r = sum(len(env.hands[q]) for i in range(4) if i != q) if q == winner else -len(env.hands[q])
                 # set last step reward for each player (Monte Carlo return will propagate)
                 if len(traj[q]) > 0:
-                    traj[q][-1] = StepRecord(
-                        logprob=traj[q][-1].logprob,
-                        entropy=traj[q][-1].entropy,
-                        value=traj[q][-1].value,
-                        reward=final_r,
-                    )
+                    traj[q][-1] = StepRecord(logprob=traj[q][-1].logprob,
+                                              entropy=traj[q][-1].entropy,
+                                              value=traj[q][-1].value,
+                                              reward=final_r,
+                                              action=traj[q][-1].action)
             break
         state = next_state
     return traj
@@ -99,10 +99,8 @@ def select_action_greedy(policy: MLPPolicy, state: np.ndarray, candidates: list[
         action_feats = [[combo_to_action_vector(c) for c in candidates]]
         logits_list, _ = policy(st, action_feats)
         logits = logits_list[0]
-        probs = F.softmax(logits, dim=0)
-        dist = torch.distributions.Categorical(probs=probs)
-        idx = dist.sample()
-        return candidates[int(idx.item())]
+        idx = logits.argmax()
+        return candidates[idx]
 
 
 def play_evaluation_game(current_policy: MLPPolicy, baseline_policy: MLPPolicy, device="cpu") -> int:
@@ -147,18 +145,29 @@ def evaluate_against_baseline(
     win_rate = wins / num_games
     return win_rate
 
+def compute_gae_from_values(rewards: torch.Tensor,
+                            values: torch.Tensor,
+                            gamma: float = 0.99,
+                            lam: float = 0.95) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    rewards: [T]  (on that player's decision steps; typically 0,...,0, ±1 at the end)
+    values:  [T]  (V(s_t) at each of those steps)
+    returns: [T]  = advantages + values
+    """
+    T = values.size(0)
+    # v_next is values shifted left, with 0 bootstrap at the last step (episode end)
+    v_next = torch.cat([values[1:], torch.zeros(1, device=values.device, dtype=values.dtype)])
+    deltas = rewards + gamma * v_next - values
 
-def train_selfplay(
-    episodes=2000,
-    lr=3e-4,
-    entropy_beta=0.01,
-    value_coef=0.5,
-    gamma=1.0,
-    seed=42,
-    device="cpu",
-    eval_interval=50,
-    eval_games=100,
-):
+    adv = torch.zeros_like(values)
+    gae = 0.0
+    for t in range(T - 1, -1, -1):
+        gae = deltas[t] + gamma * lam * gae
+        adv[t] = gae
+    returns = adv + values
+    return adv, returns
+
+def train_selfplay(batches=2000, episodes_per_batch=10,lr=3e-4, entropy_beta=0.01, value_coef=0.5, gamma=1.0, seed=42, device='cpu', eval_interval=50, eval_games=100):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -167,6 +176,10 @@ def train_selfplay(
     policy = MLPPolicy(device=device).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=lr)
 
+    # Learning rate annealing
+    initial_lr = lr
+    lr_decay = initial_lr / batches
+
     # Track losses for plotting
     loss_history = []
     policy_loss_history = []
@@ -174,73 +187,94 @@ def train_selfplay(
     entropy_history = []
 
     # Track evaluation metrics
-    eval_episodes: list[int] = []
-    win_rates: list[float] = []
-    baseline_policy: MLPPolicy | None = None
+    eval_episodes = []
+    win_rates = []
+    baseline_policy = None
 
-    for ep in range(1, episodes + 1):
-        traj = episode(env, policy, device=device)
+    for batch in tqdm(range(1, batches + 1)):
+        
+        batch_logp, batch_val, batch_ret, batch_adv, batch_ent = [], [], [], [], []
+        for _ in range(1, episodes_per_batch + 1):
+            traj = episode(env, policy, device=device)
+            for p in range(4):
+                if len(traj[p]) == 0:
+                    continue
 
-        # Build losses
-        policy_loss = torch.tensor(0.0, device=device)
-        value_loss = torch.tensor(0.0, device=device)
-        entropy_term = torch.tensor(0.0, device=device)
-        count_steps = 0
-        for p in range(4):
-            if len(traj[p]) == 0:
-                continue
-            rewards = [rec.reward for rec in traj[p]]
-            returns = compute_returns(rewards, gamma)
-            # Tensorize
-            returns_t = torch.tensor(returns, dtype=torch.float32, device=device)
-            values_t = torch.stack([rec.value for rec in traj[p]])
-            logprobs_t = torch.stack([rec.logprob for rec in traj[p]])
-            entropies_t = torch.stack([rec.entropy for rec in traj[p]])
-            advantages = returns_t - values_t.detach()
-            policy_loss = policy_loss - (logprobs_t * advantages).sum()
-            value_loss = value_loss + F.mse_loss(values_t, returns_t)
-            entropy_term = entropy_term + entropies_t.sum()
-            count_steps += len(traj[p])
+                # tensors
+                rewards_t   = torch.tensor([rec.reward  for rec in traj[p]], dtype=torch.float32, device=device) # [T]
+                values_t    = torch.stack([rec.value    for rec in traj[p]]).squeeze(-1)  # [T] (ensure 1D)
+                logprobs_t  = torch.stack([rec.logprob  for rec in traj[p]])              # [T]
+                entropies_t = torch.stack([rec.entropy  for rec in traj[p]])              # [T]
 
-        loss = policy_loss + value_coef * value_loss - entropy_beta * entropy_term
+                # GAE(lambda) returns
+                adv_t, ret_t = compute_gae_from_values(rewards_t, values_t, gamma=gamma, lam=0.95)
+
+                batch_logp.append(logprobs_t)
+                batch_val.append(values_t)
+                batch_ret.append(ret_t.detach())
+                batch_adv.append(adv_t)
+                batch_ent.append(entropies_t)
+
+        # concat
+        logp  = torch.cat(batch_logp)
+        vpred = torch.cat(batch_val)
+        ret   = torch.cat(batch_ret)
+        adv   = torch.cat(batch_adv)
+        ent   = torch.cat(batch_ent)
+
+        # normalize advantages across the batch
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+        policy_loss = -(logp * adv).mean()
+        value_loss  = F.mse_loss(vpred, ret)
+        entropy     = ent.mean()
+
+        loss = policy_loss + value_coef * value_loss - entropy_beta * entropy
         optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
         optimizer.step()
 
+        # Anneal learning rate linearly
+        new_lr = initial_lr - (batch * lr_decay)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lr
+
         # Record losses
         loss_history.append(loss.item())
         policy_loss_history.append(policy_loss.item())
         value_loss_history.append(value_loss.item())
-        entropy_history.append(entropy_term.item())
+        entropy_history.append(entropy.item())
 
-        # Evaluation every eval_interval episodes
-        if ep % eval_interval == 0:
+            # Evaluation every eval_interval episodes
+        if batch % eval_interval == 0:
             avg_len = sum(len(traj[p]) for p in range(4)) / 4.0
 
             if baseline_policy is not None:
                 # Evaluate against baseline from eval_interval episodes ago
-                print(f"\n[Episode {ep}] Evaluating against baseline from episode {ep - eval_interval}...")
+                print(f"\n[Step {batch}] Evaluating against baseline from episode {batch - eval_interval}...")
                 policy.eval()
                 baseline_policy.eval()
                 win_rate = evaluate_against_baseline(policy, baseline_policy, num_games=eval_games, device=device)
                 policy.train()
                 baseline_policy.train()
-
-                eval_episodes.append(ep)
+                
+                eval_episodes.append(batch)
                 win_rates.append(win_rate)
+                
+                print(f"[Step {batch}] Win rate vs baseline: {win_rate:.2%} ({int(win_rate * eval_games)}/{eval_games} wins)")
+                print(f"Logprobs were {logprobs_t}")
+                print(f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}\n")
+            else:
+                print(f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}")
+                print(f"Logprobs were {logprobs_t}")
+                print(f"[Step {batch}] Saving baseline checkpoint (no evaluation yet)\n")
 
-                wins_count = int(win_rate * eval_games)
-                print(f"[Episode {ep}] Win rate vs baseline: {win_rate:.2%} ({wins_count}/{eval_games} wins)")
-                print(
-                    f"[Episode {ep}] loss={loss.item():.3f} pol={policy_loss.item():.3f} "
-                    f"val={value_loss.item():.3f} ent={entropy_term.item():.3f} steps/player~{avg_len:.1f}\n"
-                )
-                # Update baseline checkpoint to current policy
+            # Update baseline checkpoint to current policy
             baseline_policy = MLPPolicy(device=device).to(device)
             baseline_policy.load_state_dict(policy.state_dict())
             baseline_policy.eval()
-
+            
     return policy, loss_history, policy_loss_history, value_loss_history, entropy_history, eval_episodes, win_rates
 
 
@@ -371,21 +405,12 @@ def value_of_starting_hand(policy: MLPPolicy, hand: list[int], sims: int = 512, 
             state = next_state
     return wins / sims
 
-
-if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    policy, loss_history, policy_loss_history, value_loss_history, entropy_history, eval_episodes, win_rates = (
-        train_selfplay(
-            episodes=1000,
-            lr=0.001,
-            entropy_beta=0.01,
-            value_coef=0.5,
-            gamma=0.9,
-            seed=42,
-            device=device,
-            eval_interval=50,
-            eval_games=100,
-        )
+if __name__ == '__main__':
+    device = "cuda" if torch.cuda.is_available() else 'cpu'
+    policy, loss_history, policy_loss_history, value_loss_history, entropy_history, eval_episodes, win_rates = train_selfplay(
+        batches=2000, episodes_per_batch=30, lr=0.004, entropy_beta=0.01,
+        value_coef=0.5, gamma=0.99, seed=42, device=device,
+        eval_interval=10, eval_games=100
     )
 
     hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0])

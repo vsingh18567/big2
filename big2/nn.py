@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .simulator.cards import PASS, Combo
+from simulator.cards import PASS, Combo
 
 DROPOUT_RATE = 0.1
 
@@ -11,12 +11,7 @@ DROPOUT_RATE = 0.1
 def input_dim() -> int:
     return 13 + 52 + 52 + 3
 
-
-def output_dim() -> int:
-    return 53  # 52 cards + 1 for pass
-
-
-def combo_to_action_vector(cmb: Combo) -> np.ndarray:
+def combo_to_action_vector(cmb: Combo) -> tuple[np.ndarray]:
     # 52 one-hot for cards used
     vec = np.zeros(52 + 1, dtype=np.float32)
     if cmb.type == PASS:
@@ -29,13 +24,12 @@ def combo_to_action_vector(cmb: Combo) -> np.ndarray:
 
 
 class MLPPolicy(nn.Module):
-    def __init__(self, card_vocab=53, card_emb_dim=32, state_dim=120, hidden=64, action_hidden=64, device="cpu"):
+    def __init__(self, card_vocab=53, card_emb_dim=32, state_dim=120, hidden=512, action_hidden=256, device='cpu'):
         super().__init__()
         self.device = device
         # State parts: 13 card IDs (-1 mapped to 52), last_play 52, seen 52, opp 3  => length 120
         self.pad_id = 52  # for -1
         self.card_emb = nn.Embedding(card_vocab, card_emb_dim)  # 0..51 real cards, 52 pad
-        self.card_layernorm = nn.LayerNorm(card_emb_dim)
         self.card_embedding_enc = nn.Linear(card_emb_dim * 13, hidden)
 
         # Linear encoders for one-hots and counts
@@ -44,7 +38,7 @@ class MLPPolicy(nn.Module):
         self.counts_enc = nn.Linear(3, hidden // 2)
 
         # State trunk
-        self.state_proj = nn.Linear(hidden + hidden + hidden + hidden // 2, hidden)  # using mean+max pool across 13
+        self.state_proj = nn.Linear(hidden + hidden + hidden + hidden // 2, hidden)
         self.state_ln = nn.LayerNorm(hidden)
 
         # Action encoder: 52 one-hot + type one-hot(9) + size scalar(1) + key features (up to 3 ints) → MLP
@@ -62,7 +56,9 @@ class MLPPolicy(nn.Module):
         )
         # Value head
         self.value_head = nn.Sequential(
-            nn.Linear(hidden, hidden), nn.ReLU(), nn.Dropout(DROPOUT_RATE), nn.Linear(hidden, 1)
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1)
         )
 
     def forward_state(self, state_tensor: torch.Tensor) -> torch.Tensor:
@@ -70,39 +66,29 @@ class MLPPolicy(nn.Module):
         B = state_tensor.shape[0]
         # Split
         hand_ids = state_tensor[:, :13].clone()
-        last_play = state_tensor[:, 13 : 13 + 52].float()
-        seen = state_tensor[:, 65 : 65 + 52].float()
-        counts = state_tensor[:, 117:120].float()
+        last_play = state_tensor[:, 13:13+52].float()
+        seen = state_tensor[:, 65:65+52].float()
+        counts = state_tensor[:, 117:].float()
         # Map -1 → pad_id
         hand_ids[hand_ids < 0] = self.pad_id
         emb = self.card_emb(hand_ids.long())  # (B,13,E)
-        emb = self.card_layernorm(emb)
-        embedding_enc = F.dropout(F.relu(self.card_embedding_enc(emb.view(B, -1))), DROPOUT_RATE)
-        lp = F.dropout(F.relu(self.last_play_enc(last_play)), DROPOUT_RATE)
-        sn = F.dropout(F.relu(self.seen_enc(seen)), DROPOUT_RATE)
-        ct = F.dropout(F.relu(self.counts_enc(counts)), DROPOUT_RATE)
+        embedding_enc = F.relu(self.card_embedding_enc(emb.view(B, -1)))
+        lp = F.relu(self.last_play_enc(last_play))
+        sn = F.relu(self.seen_enc(seen))
+        ct = F.relu(self.counts_enc(counts))
         x = torch.cat([embedding_enc, lp, sn, ct], dim=-1)
-        h = F.dropout(F.relu(self.state_proj(x)), DROPOUT_RATE)
+        h = F.relu(self.state_proj(x))
         h = self.state_ln(h)
         return h  # (B, hidden)
 
     def encode_actions(self, actions_batch: list[list[np.ndarray]]) -> torch.Tensor:
         # actions_batch: list length B, each is a list of (action_feat_vector(52+1), keytuple padded)
         # We'll pack features already provided; here we just stack the vectors.
-        # For simplicity, actions provided as plain numpy vectors length 65.
+        # For simplicity, actions provided as plain numpy vectors
         all_feats = []
         for acts in actions_batch:
-            if len(acts) == 0:
-                # Edge case: no legal moves (shouldn't happen), insert PASS
-                vec = np.zeros(52 + 1, dtype=np.float32)
-                vec[52 + 0] = 1.0  # set PASS type? We'll handle outside; keep zeros.
-                all_feats.append(torch.from_numpy(vec))
-            else:
-                for feat_vec in acts:
-                    all_feats.append(torch.from_numpy(feat_vec.astype(np.float32)))
-        if len(all_feats) == 0:
-            # Should not happen
-            all_feats = [torch.zeros(52 + 1, dtype=torch.float32)]
+            for feat_vec in acts:
+                all_feats.append(torch.from_numpy(feat_vec.astype(np.float32)))
         feats = torch.stack(all_feats, dim=0)
         return feats.to(self.device)
 
