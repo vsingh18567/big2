@@ -1,4 +1,4 @@
-from simulator.cards import (
+from ..cards import (
     FLUSH,
     FOUR_KIND,
     FULLHOUSE,

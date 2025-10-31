@@ -1,5 +1,5 @@
 [project]
-name = "simulator"
+name = "big2"
 version = "0.1.0"
 description = "Big 2 Card Game Simulator"
 authors = []

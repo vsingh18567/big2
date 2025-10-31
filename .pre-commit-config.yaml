@@ -3,17 +3,17 @@ repos:
     rev: v0.6.9
     hooks:
       - id: ruff
-        args: [--fix, simulator]
-        files: ^simulator/
+        args: [--fix, big2]
+        files: ^big2/
       - id: ruff-format
-        args: [simulator]
-        files: ^simulator/
+        args: [big2]
+        files: ^big2/
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.11.2
     hooks:
       - id: mypy
-        additional_dependencies: [typing-extensions>=4.9.0, torch, numpy]
+        additional_dependencies: [typing-extensions>=4.9.0, torch, numpy, matplotlib]
         args: [--config-file=pyproject.toml, --explicit-package-bases, --namespace-packages]
-        files: ^simulator/.*\.py$
-        exclude: ^simulator/__init__\.py$
+        files: ^big2/.*\.py$
+        exclude: ^big2/__init__\.py$

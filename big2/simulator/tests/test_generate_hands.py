@@ -1,5 +1,5 @@
-from simulator.cards import sort_cards
-from simulator.generate_hands import (
+from ..cards import sort_cards
+from ..generate_hands import (
     generate_flushes,
     generate_fourkind,
     generate_fullhouses,

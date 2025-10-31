@@ -2,7 +2,7 @@ import random
 
 import numpy as np
 
-from simulator.cards import (
+from .cards import (
     CARDS_PER_DECK,
     PAIR,
     PASS,
@@ -12,7 +12,7 @@ from simulator.cards import (
     compare_combos,
     hand_to_combo,
 )
-from simulator.generate_hands import COMBO_GENERATORS
+from .generate_hands import COMBO_GENERATORS
 
 
 class Big2Env:
