@@ -40,9 +40,7 @@ jobs:
         uv run ruff format --check .
 
     - name: Run mypy type checking
-      run: |
-        cd simulator
-        uv run mypy .
+      run: uv run mypy simulator/
 
   test:
     runs-on: ubuntu-latest
