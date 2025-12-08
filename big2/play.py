@@ -6,9 +6,9 @@ Interactive Big 2 game where you play against trained AI models.
 import numpy as np
 import torch
 
-from .nn import MLPPolicy, combo_to_action_vector
-from .simulator.cards import PAIR, PASS, SINGLE, TRIPLE, Combo, card_name
-from .simulator.env import Big2Env
+from nn import MLPPolicy, combo_to_action_vector
+from simulator.cards import PAIR, PASS, SINGLE, TRIPLE, Combo, card_name
+from simulator.env import Big2Env
 
 
 def format_combo(combo: Combo) -> str:
@@ -79,7 +79,7 @@ def get_human_choice(candidates: list[Combo], hand: list[int]) -> Combo:
             exit(0)
 
 
-def play_interactive_game(model_path: str = "big2_model.pt", device: str = "cpu"):
+def play_interactive_game(model_path: str = "big2_model.pt", n_players: int = 4, device: str = "cpu"):
     """Play an interactive game of Big 2 against trained AI."""
     print("=" * 80)
     print("🎴 Big 2 - Interactive Game")
@@ -87,13 +87,13 @@ def play_interactive_game(model_path: str = "big2_model.pt", device: str = "cpu"
     print("\nLoading trained model...")
 
     # Load the trained model
-    policy = MLPPolicy(device=device).to(device)
+    policy = MLPPolicy(n_players=n_players, device=device).to(device)
     policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     policy.eval()
     print(f"✓ Model loaded from {model_path}")
 
     # Create the environment
-    env = Big2Env(4)
+    env = Big2Env(n_players)
     state = env.reset()
 
     # Determine which player is human (the one who starts with 3♦)
@@ -129,8 +129,8 @@ def play_interactive_game(model_path: str = "big2_model.pt", device: str = "cpu"
 
             # Show opponent card counts
             print("\n👥 Opponents:")
-            for i in range(1, 4):
-                opp_idx = (human_player + i) % 4
+            for i in range(1, n_players):
+                opp_idx = (human_player + i) % n_players
                 print(f"  Player {opp_idx}: {len(env.hands[opp_idx])} cards")
 
             # Get legal moves
@@ -176,7 +176,7 @@ def play_interactive_game(model_path: str = "big2_model.pt", device: str = "cpu"
         print(f"\n😔 Player {env.winner} won. Better luck next time!")
 
     print("\nFinal standings:")
-    for i in range(4):
+    for i in range(n_players):
         cards_left = len(env.hands[i])
         status = "🏆 WINNER" if i == env.winner else f"{cards_left} cards left"
         player_label = "You" if i == human_player else f"Player {i}"
@@ -189,9 +189,10 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_path = sys.argv[1] if len(sys.argv) > 1 else "big2_model.pt"
+    n_players = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 
     try:
-        play_interactive_game(model_path, device)
+        play_interactive_game(model_path, n_players, device)
     except KeyboardInterrupt:
         print("\n\nGame interrupted. Thanks for playing!")
     except FileNotFoundError:

@@ -19,12 +19,13 @@ class StepRecord:
     entropy: torch.Tensor
     value: torch.Tensor
     reward: float
+    max_logprob: torch.Tensor | None = None
     action: str | None = None
 
 
 def select_action(
     policy: MLPPolicy, state: np.ndarray, candidates: list[Combo]
-) -> tuple[Combo, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[Combo, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # Prepare batch with one element
     st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)
     action_feats = [[combo_to_action_vector(c) for c in candidates]]
@@ -36,14 +37,16 @@ def select_action(
     idx = dist.sample()
     logprob = dist.log_prob(idx)
     entropy = dist.entropy()
+    # Compute max logprob across all actions
+    max_prob = probs.max()
     chosen = candidates[int(idx.item())]
     value = values[0]
-    return chosen, logprob, entropy, value
+    return chosen, logprob, entropy, value, max_prob
 
 
-def episode(env: Big2Env, policy: MLPPolicy, device="cpu"):
+def episode(env: Big2Env, policy: MLPPolicy):
     # Records per player
-    traj: dict[int, list[StepRecord]] = {p: [] for p in range(4)}
+    traj: dict[int, list[StepRecord]] = {p: [] for p in range(env.n_players)}
     state = env.reset()
     while True:
         p = env.current_player
@@ -51,7 +54,7 @@ def episode(env: Big2Env, policy: MLPPolicy, device="cpu"):
         # Safety: if no candidates somehow, force PASS
         if not candidates:
             candidates = [Combo(PASS, [], ())]
-        action, logprob, entropy, value = select_action(policy, state, candidates)
+        action, logprob, entropy, value, max_logprob = select_action(policy, state, candidates)
 
         hand_cards = env.hands[p]
         hand_str = " ".join([card_name(c) for c in sorted(hand_cards)])
@@ -62,20 +65,21 @@ def episode(env: Big2Env, policy: MLPPolicy, device="cpu"):
 
         next_state, reward, done, _ = env.step(action)
         # Store step
-        traj[p].append(StepRecord(logprob=logprob, entropy=entropy, value=value, reward=reward, action=action_str))
+        traj[p].append(StepRecord(logprob=logprob, entropy=entropy, value=value, reward=reward, max_logprob=max_logprob, action=action_str))
         # Assign terminal rewards at the end
         if done:
             winner = env.winner
-            for q in range(4):
+            for q in range(env.n_players):
                 # If winner: reward is the number of cards in the other players' hands
                 # If loser: reward is the negative number of cards in our hand
-                final_r = sum(len(env.hands[q]) for i in range(4) if i != q) if q == winner else -len(env.hands[q])
+                final_r = sum(len(env.hands[i]) for i in range(env.n_players) if i != q) if q == winner else 0.0
                 # set last step reward for each player (Monte Carlo return will propagate)
                 if len(traj[q]) > 0:
                     traj[q][-1] = StepRecord(logprob=traj[q][-1].logprob,
                                               entropy=traj[q][-1].entropy,
                                               value=traj[q][-1].value,
                                               reward=final_r,
+                                              max_logprob=traj[q][-1].max_logprob,
                                               action=traj[q][-1].action)
             break
         state = next_state
@@ -103,12 +107,17 @@ def select_action_greedy(policy: MLPPolicy, state: np.ndarray, candidates: list[
         return candidates[idx]
 
 
-def play_evaluation_game(current_policy: MLPPolicy, baseline_policy: MLPPolicy, device="cpu") -> int:
+def select_action_random(candidates: list[Combo]) -> Combo:
+    """Select action randomly for evaluation."""
+    return random.choice(candidates)
+
+
+def play_evaluation_game(current_policy: MLPPolicy, n_players: int, device="cpu") -> int:
     """
-    Play one game where player 0 uses current_policy and players 1-3 use baseline_policy.
-    Returns the winner (0 if current policy wins, 1-3 if baseline wins).
+    Play one game where player 0 uses current_policy and players 1-(n_players-1) use random policy.
+    Returns the winner (0 if current policy wins, 1-(n_players-1) if random policy wins).
     """
-    env = Big2Env(4)
+    env = Big2Env(n_players)
     state = env.reset()
 
     while not env.done:
@@ -117,11 +126,11 @@ def play_evaluation_game(current_policy: MLPPolicy, baseline_policy: MLPPolicy, 
         if not candidates:
             candidates = [Combo(PASS, [], ())]
 
-        # Player 0 uses current policy, others use baseline
+        # Player 0 uses current policy, others use random policy
         if p == 0:
             action = select_action_greedy(current_policy, state, candidates)
         else:
-            action = select_action_greedy(baseline_policy, state, candidates)
+            action = select_action_random(candidates)
 
         state, _, _, _ = env.step(action)
 
@@ -129,16 +138,16 @@ def play_evaluation_game(current_policy: MLPPolicy, baseline_policy: MLPPolicy, 
     return env.winner
 
 
-def evaluate_against_baseline(
-    current_policy: MLPPolicy, baseline_policy: MLPPolicy, num_games: int = 100, device="cpu"
+def evaluate_against_random(
+    current_policy: MLPPolicy, n_players: int, num_games: int = 100, device="cpu"
 ) -> float:
     """
-    Evaluate current policy against baseline by playing num_games.
+    Evaluate current policy against random policy by playing num_games.
     Returns win rate of current policy (player 0).
     """
     wins = 0
     for _ in range(num_games):
-        winner = play_evaluation_game(current_policy, baseline_policy, device)
+        winner = play_evaluation_game(current_policy, n_players, device)
         if winner == 0:
             wins += 1
 
@@ -155,6 +164,7 @@ def compute_gae_from_values(rewards: torch.Tensor,
     returns: [T]  = advantages + values
     """
     T = values.size(0)
+    values = torch.zeros_like(values)
     # v_next is values shifted left, with 0 bootstrap at the last step (episode end)
     v_next = torch.cat([values[1:], torch.zeros(1, device=values.device, dtype=values.dtype)])
     deltas = rewards + gamma * v_next - values
@@ -167,13 +177,13 @@ def compute_gae_from_values(rewards: torch.Tensor,
     returns = adv + values
     return adv, returns
 
-def train_selfplay(batches=2000, episodes_per_batch=10,lr=3e-4, entropy_beta=0.01, value_coef=0.5, gamma=1.0, seed=42, device='cpu', eval_interval=50, eval_games=100):
+def train_selfplay(n_players=4, batches=2000, episodes_per_batch=10,lr=3e-4, entropy_beta=0.01, value_coef=0.5, gamma=1.0, seed=42, device='cpu', eval_interval=50, eval_games=100):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    env = Big2Env(4)
-    policy = MLPPolicy(device=device).to(device)
+    env = Big2Env(n_players)
+    policy = MLPPolicy(n_players=n_players, device=device).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=lr)
 
     # Learning rate annealing
@@ -185,18 +195,18 @@ def train_selfplay(batches=2000, episodes_per_batch=10,lr=3e-4, entropy_beta=0.0
     policy_loss_history = []
     value_loss_history = []
     entropy_history = []
+    max_logprob_history = []
 
     # Track evaluation metrics
     eval_episodes = []
     win_rates = []
-    baseline_policy = None
 
     for batch in tqdm(range(1, batches + 1)):
         
-        batch_logp, batch_val, batch_ret, batch_adv, batch_ent = [], [], [], [], []
+        batch_logp, batch_val, batch_ret, batch_adv, batch_ent, batch_max_logp = [], [], [], [], [], []
         for _ in range(1, episodes_per_batch + 1):
-            traj = episode(env, policy, device=device)
-            for p in range(4):
+            traj = episode(env, policy)
+            for p in range(n_players):
                 if len(traj[p]) == 0:
                     continue
 
@@ -205,6 +215,7 @@ def train_selfplay(batches=2000, episodes_per_batch=10,lr=3e-4, entropy_beta=0.0
                 values_t    = torch.stack([rec.value    for rec in traj[p]]).squeeze(-1)  # [T] (ensure 1D)
                 logprobs_t  = torch.stack([rec.logprob  for rec in traj[p]])              # [T]
                 entropies_t = torch.stack([rec.entropy  for rec in traj[p]])              # [T]
+                max_logprobs_t = torch.stack([rec.max_logprob for rec in traj[p]])       # [T]
 
                 # GAE(lambda) returns
                 adv_t, ret_t = compute_gae_from_values(rewards_t, values_t, gamma=gamma, lam=0.95)
@@ -214,6 +225,7 @@ def train_selfplay(batches=2000, episodes_per_batch=10,lr=3e-4, entropy_beta=0.0
                 batch_ret.append(ret_t.detach())
                 batch_adv.append(adv_t)
                 batch_ent.append(entropies_t)
+                batch_max_logp.append(max_logprobs_t)
 
         # concat
         logp  = torch.cat(batch_logp)
@@ -221,6 +233,7 @@ def train_selfplay(batches=2000, episodes_per_batch=10,lr=3e-4, entropy_beta=0.0
         ret   = torch.cat(batch_ret)
         adv   = torch.cat(batch_adv)
         ent   = torch.cat(batch_ent)
+        max_logp = torch.cat(batch_max_logp)
 
         # normalize advantages across the batch
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -228,8 +241,9 @@ def train_selfplay(batches=2000, episodes_per_batch=10,lr=3e-4, entropy_beta=0.0
         policy_loss = -(logp * adv).mean()
         value_loss  = F.mse_loss(vpred, ret)
         entropy     = ent.mean()
+        avg_max_logprob = max_logp.mean()
 
-        loss = policy_loss + value_coef * value_loss - entropy_beta * entropy
+        loss = policy_loss - entropy_beta * entropy
         optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
@@ -245,37 +259,29 @@ def train_selfplay(batches=2000, episodes_per_batch=10,lr=3e-4, entropy_beta=0.0
         policy_loss_history.append(policy_loss.item())
         value_loss_history.append(value_loss.item())
         entropy_history.append(entropy.item())
+        max_logprob_history.append(avg_max_logprob.item())
 
             # Evaluation every eval_interval episodes
         if batch % eval_interval == 0:
-            avg_len = sum(len(traj[p]) for p in range(4)) / 4.0
+            avg_len = sum(len(traj[p]) for p in range(n_players)) / n_players
 
-            if baseline_policy is not None:
-                # Evaluate against baseline from eval_interval episodes ago
-                print(f"\n[Step {batch}] Evaluating against baseline from episode {batch - eval_interval}...")
-                policy.eval()
-                baseline_policy.eval()
-                win_rate = evaluate_against_baseline(policy, baseline_policy, num_games=eval_games, device=device)
-                policy.train()
-                baseline_policy.train()
-                
-                eval_episodes.append(batch)
-                win_rates.append(win_rate)
-                
-                print(f"[Step {batch}] Win rate vs baseline: {win_rate:.2%} ({int(win_rate * eval_games)}/{eval_games} wins)")
-                print(f"Logprobs were {logprobs_t}")
-                print(f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}\n")
-            else:
-                print(f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}")
-                print(f"Logprobs were {logprobs_t}")
-                print(f"[Step {batch}] Saving baseline checkpoint (no evaluation yet)\n")
-
-            # Update baseline checkpoint to current policy
-            baseline_policy = MLPPolicy(device=device).to(device)
-            baseline_policy.load_state_dict(policy.state_dict())
-            baseline_policy.eval()
+            # Evaluate against random policy
+            print(f"\n[Step {batch}] Evaluating against random policy...")
+            policy.eval()
+            win_rate = evaluate_against_random(policy, n_players, num_games=eval_games, device=device)
+            policy.train()
             
-    return policy, loss_history, policy_loss_history, value_loss_history, entropy_history, eval_episodes, win_rates
+            eval_episodes.append(batch)
+            win_rates.append(win_rate)
+            
+            print(f"[Step {batch}] Win rate vs random: {win_rate:.2%} ({int(win_rate * eval_games)}/{eval_games} wins)")
+            print(f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}\n")
+
+            save_path = f"big2_model_step_{batch}.pt"
+            torch.save(policy.state_dict(), save_path)
+            print(f"Checkpoint saved to {save_path}")
+            
+    return policy, loss_history, policy_loss_history, value_loss_history, entropy_history, max_logprob_history, eval_episodes, win_rates
 
 
 def plot_training_curves(
@@ -283,24 +289,29 @@ def plot_training_curves(
     policy_loss_history,
     value_loss_history,
     entropy_history,
+    max_logprob_history=None,
     eval_episodes=None,
     win_rates=None,
     save_path="training_curves.png",
 ):
     """Plot training curves and save to file."""
-    # Create figure with 5 subplots if we have evaluation data, otherwise 4
+    # Create figure with 6 subplots if we have evaluation data, otherwise 5
     if eval_episodes and win_rates:
-        fig = plt.figure(figsize=(16, 10))
-        gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
+        fig = plt.figure(figsize=(18, 12))
+        gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
         ax1 = fig.add_subplot(gs[0, 0])
         ax2 = fig.add_subplot(gs[0, 1])
         ax3 = fig.add_subplot(gs[1, 0])
         ax4 = fig.add_subplot(gs[1, 1])
-        ax5 = fig.add_subplot(gs[:, 2])  # Win rate takes full right column
-        axes = [ax1, ax2, ax3, ax4, ax5]
+        ax5 = fig.add_subplot(gs[2, 0])
+        ax6 = fig.add_subplot(gs[:, 2])  # Win rate takes full right column
+        axes = [ax1, ax2, ax3, ax4, ax5, ax6]
     else:
-        fig, axes_2d = plt.subplots(2, 2, figsize=(14, 10))
-        axes = axes_2d.flatten()
+        fig = plt.figure(figsize=(16, 10))
+        gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
+        axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1]), 
+                fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1]),
+                fig.add_subplot(gs[0, 2])]
 
     fig.suptitle("Big 2 Training Curves", fontsize=16, fontweight="bold")
 
@@ -338,23 +349,32 @@ def plot_training_curves(
     axes[3].grid(True, alpha=0.3)
     axes[3].set_xlim(1, len(loss_history))
 
-    # Win Rate (if available)
-    if eval_episodes and win_rates and len(axes) > 4:
-        axes[4].plot(eval_episodes, win_rates, linewidth=2.5, color="#C9184A", marker="o", markersize=6)
-        axes[4].axhline(y=0.25, color="gray", linestyle="--", linewidth=1, alpha=0.5, label="Random (25%)")
+    # Max Logprob (if available)
+    if max_logprob_history and len(axes) > 4:
+        axes[4].plot(episodes, max_logprob_history, linewidth=1.5, color="#9B59B6")
         axes[4].set_xlabel("Episode", fontsize=11)
-        axes[4].set_ylabel("Win Rate", fontsize=11)
-        axes[4].set_title(
-            "Win Rate vs Previous Checkpoint\n(Current policy as Player 0 vs 3 baseline copies)",
+        axes[4].set_ylabel("Max Logprob", fontsize=11)
+        axes[4].set_title("Maximum Logprob Across Actions", fontsize=12, fontweight="bold")
+        axes[4].grid(True, alpha=0.3)
+        axes[4].set_xlim(1, len(loss_history))
+
+    # Win Rate (if available)
+    if eval_episodes and win_rates and len(axes) > 5:
+        axes[5].plot(eval_episodes, win_rates, linewidth=2.5, color="#C9184A", marker="o", markersize=6)
+        axes[5].axhline(y=0.25, color="gray", linestyle="--", linewidth=1, alpha=0.5, label="Expected Random (25%)")
+        axes[5].set_xlabel("Episode", fontsize=11)
+        axes[5].set_ylabel("Win Rate", fontsize=11)
+        axes[5].set_title(
+            "Win Rate vs Random Policy\n(Current policy as Player 0 vs 3 random players)",
             fontsize=12,
             fontweight="bold",
         )
-        axes[4].grid(True, alpha=0.3)
-        axes[4].set_xlim(min(eval_episodes) if eval_episodes else 0, len(loss_history))
-        axes[4].set_ylim(0, 1)
-        axes[4].legend(loc="lower right")
+        axes[5].grid(True, alpha=0.3)
+        axes[5].set_xlim(min(eval_episodes) if eval_episodes else 0, len(loss_history))
+        axes[5].set_ylim(0, 1)
+        axes[5].legend(loc="lower right")
         # Add percentage labels
-        axes[4].yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+        axes[5].yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
@@ -362,24 +382,26 @@ def plot_training_curves(
     plt.close()
 
 
-def value_of_starting_hand(policy: MLPPolicy, hand: list[int], sims: int = 512, device="cpu") -> float:
+def value_of_starting_hand(policy: MLPPolicy, hand: list[int], n_players: int = 4, sims: int = 512, device="cpu") -> float:
     # Monte Carlo rollouts with frozen policy; returns expected terminal reward for seat 0 with given starting hand
     wins = 0.0
+    cards_per_player = 52 // n_players
     for _ in range(sims):
-        env = Big2Env(4)
+        env = Big2Env(n_players)
         # Force seat 0 hand
         deck = set(range(52))
-        for p in range(4):
+        for p in range(n_players):
             env.hands[p] = []
         env.hands[0] = sorted(hand)
         remain = list(deck - set(hand))
         random.shuffle(remain)
-        env.hands[1] = sorted(remain[:13])
-        env.hands[2] = sorted(remain[13:26])
-        env.hands[3] = sorted(remain[26:39])
+        for p in range(1, n_players):
+            start_idx = (p - 1) * cards_per_player
+            end_idx = p * cards_per_player
+            env.hands[p] = sorted(remain[start_idx:end_idx])
         # who holds 3♦ starts
         start_player = 0
-        for p in range(4):
+        for p in range(n_players):
             if 0 in env.hands[p]:
                 start_player = p
                 break
@@ -397,31 +419,34 @@ def value_of_starting_hand(policy: MLPPolicy, hand: list[int], sims: int = 512, 
             candidates = env.legal_candidates(p)
             if not candidates:
                 candidates = [Combo(PASS, [], ())]
-            action, logprob, entropy, value = select_action(policy, state, candidates)
+            action, logprob, entropy, value, max_logprob = select_action(policy, state, candidates)
             next_state, reward, done, _ = env.step(action)
             if done:
-                wins += 1.0 if env.winner == 0 else -1.0
+                wins += 1.0 if env.winner == 0 else 0.0
                 break
             state = next_state
     return wins / sims
 
 if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else 'cpu'
-    policy, loss_history, policy_loss_history, value_loss_history, entropy_history, eval_episodes, win_rates = train_selfplay(
-        batches=2000, episodes_per_batch=30, lr=0.004, entropy_beta=0.01,
+    n_players = 2  # Can be changed to 2, 3, or 4
+    cards_per_player = 52 // n_players
+    
+    policy, loss_history, policy_loss_history, value_loss_history, entropy_history, max_logprob_history, eval_episodes, win_rates = train_selfplay(
+        n_players=n_players, batches=200, episodes_per_batch=16, lr=0.004, entropy_beta=0.01,
         value_coef=0.5, gamma=0.99, seed=42, device=device,
-        eval_interval=10, eval_games=100
+        eval_interval=50, eval_games=100
     )
 
-    hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0])
-    val = value_of_starting_hand(policy, hand, sims=64, device=device)
+    hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
+    val = value_of_starting_hand(policy, hand, n_players=n_players, sims=64, device=device)
     print("Random starting hand:", [card_name(c) for c in hand])
-    print("Estimated value:", val)
+    print("Win rate:", val)
 
-    hand = sorted(random.sample(range(52), 13))
-    val = value_of_starting_hand(policy, hand, sims=64, device=device)
+    hand = sorted(random.sample(range(52), cards_per_player))
+    val = value_of_starting_hand(policy, hand, n_players=n_players, sims=64, device=device)
     print("Random starting hand:", [card_name(c) for c in hand])
-    print("Estimated value:", val)
+    print("Win rate:", val)
 
     # Save the trained model
     save_path = "big2_model.pt"
@@ -430,5 +455,5 @@ if __name__ == '__main__':
 
     # Plot and save training curves
     plot_training_curves(
-        loss_history, policy_loss_history, value_loss_history, entropy_history, eval_episodes, win_rates
+        loss_history, policy_loss_history, value_loss_history, entropy_history, max_logprob_history, eval_episodes, win_rates
     )

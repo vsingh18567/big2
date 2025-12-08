@@ -49,9 +49,10 @@ class Big2Env:
 
     def _obs(self, player: int) -> np.ndarray:
         """Converts the internal game state into a numpy array"""
-        # 13 scalars for current hand, -1 padded; last-play 52 one-hot; seen 52; opponents counts 3
+        # cards_per_player scalars for current hand, -1 padded; last-play 52 one-hot; seen 52; opponents counts (n_players-1)
+        cards_per_player = CARDS_PER_DECK // self.n_players
         hand = self.hands[player]
-        hand_ids = hand + [-1] * (13 - len(hand))
+        hand_ids = hand + [-1] * (cards_per_player - len(hand))
         last_play = [0] * 52
         if self.trick_pile is not None:
             for c in self.trick_pile.cards:
@@ -61,9 +62,9 @@ class Big2Env:
 
         # Opponent counts clockwise from current player
         counts = []
-        for i in range(1, 4):
+        for i in range(1, self.n_players):
             counts.append(len(self.hands[(player + i) % self.n_players]))
-            state = np.array(hand_ids + last_play + seen + counts, dtype=np.int32)
+        state = np.array(hand_ids + last_play + seen + counts, dtype=np.int32)
 
         return state
 
@@ -119,7 +120,6 @@ class Big2Env:
         player_hand = self.hands[self.current_player]
         reward = 0
         if action.type == PASS:
-            reward -= 0.5
             self.passes_in_row += 1
             # If this player was the 3rd pass in a row, the next player has control
             if self.passes_in_row >= self.n_players - 1:
@@ -127,9 +127,6 @@ class Big2Env:
                 self.passes_in_row = 0
 
         else:
-            # Previous trick played by this player won them the trick, reward them now
-            if self.trick_pile is None and len(player_hand) < 13:
-                reward += 0.05
             for c in action.cards:
                 player_hand.remove(c)
                 self.seen[c] = 1
@@ -138,7 +135,6 @@ class Big2Env:
             if len(player_hand) == 0:
                 self.done = True
                 self.winner = self.current_player
-                reward += 1
         
         # If not done, advance the current player
         if not self.done:

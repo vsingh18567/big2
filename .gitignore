@@ -46,3 +46,10 @@ dmypy.json
 .coverage
 htmlcov/
 .pytest_cache/
+
+# Model checkpoints
+*.pt
+
+# Figures
+*.png
+*.jpg

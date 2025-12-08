@@ -56,32 +56,34 @@ class TestEnv:
         obs = env.reset()
 
         # Observation should have:
-        # - 13 hand slots (card ids, -1 padded)
+        # - cards_per_player hand slots (card ids, -1 padded)
         # - 52 last play one-hot
         # - 52 seen cards
-        # - 3 opponent counts
-        # Total: 13 + 52 + 52 + 3 = 120
-        assert len(obs) == 120
+        # - (n_players - 1) opponent counts
+        # Total: cards_per_player + 52 + 52 + (n_players - 1)
+        cards_per_player = CARDS_PER_DECK // env.n_players
+        expected_len = cards_per_player + 52 + 52 + (env.n_players - 1)
+        assert len(obs) == expected_len
         assert obs.dtype == np.int32
 
-        # Check hand portion (first 13 elements)
-        hand_portion = obs[:13]
+        # Check hand portion (first cards_per_player elements)
+        hand_portion = obs[:cards_per_player]
         hand = env.hands[env.current_player]
         assert len([x for x in hand_portion if x != -1]) == len(hand)
         for card in hand:
             assert card in hand_portion
 
         # Check last play is all zeros initially (no plays yet)
-        last_play_portion = obs[13:65]
+        last_play_portion = obs[cards_per_player:cards_per_player+52]
         assert np.sum(last_play_portion) == 0
 
         # Check seen is all zeros initially
-        seen_portion = obs[65:117]
+        seen_portion = obs[cards_per_player+52:cards_per_player+104]
         assert np.sum(seen_portion) == 0
 
-        # Check opponent counts (should all be 13 initially)
-        opponent_counts = obs[117:120]
-        assert all(c == 13 for c in opponent_counts)
+        # Check opponent counts (should all be cards_per_player initially)
+        opponent_counts = obs[cards_per_player+104:]
+        assert all(c == cards_per_player for c in opponent_counts)
 
     def test_single_play_and_state_update(self):
         """Test playing a single card and checking state updates"""
@@ -111,10 +113,11 @@ class TestEnv:
         assert done is False
 
         # Check current player advanced
-        assert env.current_player == (initial_player + 1) % 4
+        assert env.current_player == (initial_player + 1) % env.n_players
 
         # Check observation reflects the play
-        last_play_portion = obs[13:65]
+        cards_per_player = CARDS_PER_DECK // env.n_players
+        last_play_portion = obs[cards_per_player:cards_per_player+52]
         assert last_play_portion[0] == 1  # Card 0 was played
         assert np.sum(last_play_portion) == 1  # Only one card
 
@@ -147,7 +150,8 @@ class TestEnv:
         assert env.passes_in_row == 0  # Reset
         assert env.trick_pile is None  # Trick cleared
 
-        last_play_portion = obs[13:65]  # type: ignore[unreachable]
+        cards_per_player = CARDS_PER_DECK // env.n_players
+        last_play_portion = obs[cards_per_player:cards_per_player+52]  # type: ignore[unreachable]
         assert np.sum(last_play_portion) == 0
 
     def test_legal_candidates_fresh_trick(self):
@@ -278,7 +282,9 @@ class TestEnv:
             moves_played += 1
 
             # Verify observation structure remains valid
-            assert len(obs) == 120
+            cards_per_player = CARDS_PER_DECK // env.n_players
+            expected_obs_len = cards_per_player + 52 + 52 + (env.n_players - 1)
+            assert len(obs) == expected_obs_len
 
             # Verify hand sizes
             total_cards = sum(len(h) for h in env.hands)
@@ -289,7 +295,7 @@ class TestEnv:
         assert moves_played < max_moves
         assert env.done
         assert env.winner is not None
-        assert 0 <= env.winner < 4
+        assert 0 <= env.winner < env.n_players
         assert len(env.hands[env.winner]) == 0
 
     def test_five_card_combo_play(self):
@@ -336,13 +342,14 @@ class TestEnv:
 
         if not env.done:
             # Check opponent counts in observation
-            opponent_counts = obs[117:120]
+            cards_per_player = CARDS_PER_DECK // env.n_players
+            opponent_counts = obs[cards_per_player+104:]
             current = env.current_player
 
             # Verify counts match actual hand sizes
             expected_counts = []
-            for i in range(1, 4):
-                opponent_idx = (current + i) % 4
+            for i in range(1, env.n_players):
+                opponent_idx = (current + i) % env.n_players
                 expected_counts.append(len(env.hands[opponent_idx]))
 
             assert list(opponent_counts) == expected_counts
@@ -447,7 +454,9 @@ class TestEnv:
         initial_obs = env.reset()
 
         # Verify initial state
-        assert len(initial_obs) == 120
+        cards_per_player = CARDS_PER_DECK // env.n_players
+        expected_obs_len = cards_per_player + 52 + 52 + (env.n_players - 1)
+        assert len(initial_obs) == expected_obs_len
         assert sum(len(h) for h in env.hands) == CARDS_PER_DECK
         assert sum(env.seen) == 0
 
@@ -473,7 +482,9 @@ class TestEnv:
             moves += 1
 
             # Verify consistency
-            assert len(obs) == 120
+            cards_per_player = CARDS_PER_DECK // env.n_players
+            expected_obs_len = cards_per_player + 52 + 52 + (env.n_players - 1)
+            assert len(obs) == expected_obs_len
 
             # Check cards are properly removed from hand
             if action.type != PASS:

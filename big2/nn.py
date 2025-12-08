@@ -8,8 +8,14 @@ from simulator.cards import PASS, Combo
 DROPOUT_RATE = 0.1
 
 
-def input_dim() -> int:
-    return 13 + 52 + 52 + 3
+def input_dim(n_players: int = 4) -> int:
+    """Calculate input dimension based on number of players.
+    
+    Returns:
+        cards_per_player + 52 (last_play) + 52 (seen) + (n_players - 1) (opponent counts)
+    """
+    cards_per_player = 52 // n_players
+    return cards_per_player + 52 + 52 + (n_players - 1)
 
 def combo_to_action_vector(cmb: Combo) -> tuple[np.ndarray]:
     # 52 one-hot for cards used
@@ -24,18 +30,20 @@ def combo_to_action_vector(cmb: Combo) -> tuple[np.ndarray]:
 
 
 class MLPPolicy(nn.Module):
-    def __init__(self, card_vocab=53, card_emb_dim=32, state_dim=120, hidden=512, action_hidden=256, device='cpu'):
+    def __init__(self, n_players: int = 4, card_vocab=53, card_emb_dim=32, hidden=512, action_hidden=256, device='cpu'):
         super().__init__()
         self.device = device
-        # State parts: 13 card IDs (-1 mapped to 52), last_play 52, seen 52, opp 3  => length 120
+        self.n_players = n_players
+        self.cards_per_player = 52 // n_players
+        # State parts: cards_per_player card IDs (-1 mapped to 52), last_play 52, seen 52, opp (n_players-1)
         self.pad_id = 52  # for -1
         self.card_emb = nn.Embedding(card_vocab, card_emb_dim)  # 0..51 real cards, 52 pad
-        self.card_embedding_enc = nn.Linear(card_emb_dim * 13, hidden)
+        self.card_embedding_enc = nn.Linear(card_emb_dim * self.cards_per_player, hidden)
 
         # Linear encoders for one-hots and counts
         self.last_play_enc = nn.Linear(52, hidden)
         self.seen_enc = nn.Linear(52, hidden)
-        self.counts_enc = nn.Linear(3, hidden // 2)
+        self.counts_enc = nn.Linear(n_players - 1, hidden // 2)
 
         # State trunk
         self.state_proj = nn.Linear(hidden + hidden + hidden + hidden // 2, hidden)
@@ -62,13 +70,13 @@ class MLPPolicy(nn.Module):
         )
 
     def forward_state(self, state_tensor: torch.Tensor) -> torch.Tensor:
-        # state_tensor shape: (B, 120) ints
+        # state_tensor shape: (B, input_dim) ints
         B = state_tensor.shape[0]
         # Split
-        hand_ids = state_tensor[:, :13].clone()
-        last_play = state_tensor[:, 13:13+52].float()
-        seen = state_tensor[:, 65:65+52].float()
-        counts = state_tensor[:, 117:].float()
+        hand_ids = state_tensor[:, :self.cards_per_player].clone()
+        last_play = state_tensor[:, self.cards_per_player:self.cards_per_player+52].float()
+        seen = state_tensor[:, self.cards_per_player+52:self.cards_per_player+104].float()
+        counts = state_tensor[:, self.cards_per_player+104:].float()
         # Map -1 → pad_id
         hand_ids[hand_ids < 0] = self.pad_id
         emb = self.card_emb(hand_ids.long())  # (B,13,E)
