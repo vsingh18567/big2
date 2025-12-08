@@ -2,7 +2,7 @@ import random
 
 import numpy as np
 
-from ..cards import (
+from big2.simulator.cards import (
     CARDS_PER_DECK,
     PAIR,
     PASS,
@@ -13,7 +13,7 @@ from ..cards import (
     compare_combos,
     hand_to_combo,
 )
-from ..env import Big2Env
+from big2.simulator.env import Big2Env
 
 
 class TestEnv:
@@ -74,15 +74,15 @@ class TestEnv:
             assert card in hand_portion
 
         # Check last play is all zeros initially (no plays yet)
-        last_play_portion = obs[cards_per_player:cards_per_player+52]
+        last_play_portion = obs[cards_per_player : cards_per_player + 52]
         assert np.sum(last_play_portion) == 0
 
         # Check seen is all zeros initially
-        seen_portion = obs[cards_per_player+52:cards_per_player+104]
+        seen_portion = obs[cards_per_player + 52 : cards_per_player + 104]
         assert np.sum(seen_portion) == 0
 
         # Check opponent counts (should all be cards_per_player initially)
-        opponent_counts = obs[cards_per_player+104:]
+        opponent_counts = obs[cards_per_player + 104 :]
         assert all(c == cards_per_player for c in opponent_counts)
 
     def test_single_play_and_state_update(self):
@@ -99,7 +99,7 @@ class TestEnv:
         action = hand_to_combo([0])
         assert action is not None
 
-        obs, reward, done, info = env.step(action)
+        obs, done = env.step(action)
 
         # Check state updates
         assert env.trick_pile is not None
@@ -109,7 +109,6 @@ class TestEnv:
         assert 0 not in env.hands[initial_player]
         assert len(env.hands[initial_player]) == len(initial_hand) - 1
         assert env.passes_in_row == 0
-        assert reward == 0  # Game not won yet
         assert done is False
 
         # Check current player advanced
@@ -117,7 +116,7 @@ class TestEnv:
 
         # Check observation reflects the play
         cards_per_player = CARDS_PER_DECK // env.n_players
-        last_play_portion = obs[cards_per_player:cards_per_player+52]
+        last_play_portion = obs[cards_per_player : cards_per_player + 52]
         assert last_play_portion[0] == 1  # Card 0 was played
         assert np.sum(last_play_portion) == 1  # Only one card
 
@@ -136,22 +135,22 @@ class TestEnv:
         pass_action = Combo(PASS, [], ())
 
         # First pass
-        obs, reward, done, info = env.step(pass_action)
+        obs, done = env.step(pass_action)
         assert env.passes_in_row == 1
         assert env.trick_pile is not None  # Trick still active
 
         # Second pass
-        obs, reward, done, info = env.step(pass_action)
+        obs, done = env.step(pass_action)
         assert env.passes_in_row == 2
         assert env.trick_pile is not None  # Trick still active
 
         # Third pass - should reset the trick
-        obs, reward, done, info = env.step(pass_action)
+        obs, done = env.step(pass_action)
         assert env.passes_in_row == 0  # Reset
         assert env.trick_pile is None  # Trick cleared
 
         cards_per_player = CARDS_PER_DECK // env.n_players
-        last_play_portion = obs[cards_per_player:cards_per_player+52]  # type: ignore[unreachable]
+        last_play_portion = obs[cards_per_player : cards_per_player + 52]
         assert np.sum(last_play_portion) == 0
 
     def test_legal_candidates_fresh_trick(self):
@@ -227,7 +226,7 @@ class TestEnv:
             assert action is not None
             assert action.type == PAIR
 
-            obs, reward, done, info = env.step(action)
+            obs, done = env.step(action)
 
             # Check pair was played
             assert env.trick_pile is not None
@@ -252,12 +251,11 @@ class TestEnv:
 
         action = hand_to_combo([0])
         assert action is not None
-        obs, reward, done, info = env.step(action)
+        obs, done = env.step(action)
 
         # Check winning conditions
         assert done is True
         assert env.winner == player
-        assert reward == 1
         assert len(env.hands[player]) == 0
 
     def test_full_game_simulation(self):
@@ -278,7 +276,7 @@ class TestEnv:
             # Simple strategy: play the first legal candidate
             action = candidates[0]
 
-            obs, reward, done, info = env.step(action)
+            obs, done = env.step(action)
             moves_played += 1
 
             # Verify observation structure remains valid
@@ -316,7 +314,7 @@ class TestEnv:
         assert action is not None
         assert action.type == STRAIGHT
 
-        obs, reward, done, info = env.step(action)
+        obs, done = env.step(action)
 
         # Check the straight was played
         assert env.trick_pile is not None
@@ -338,12 +336,12 @@ class TestEnv:
             player = env.current_player
             candidates = env.legal_candidates(player)
             action = candidates[0]
-            obs, _, _, _ = env.step(action)
+            obs, _ = env.step(action)
 
         if not env.done:
             # Check opponent counts in observation
             cards_per_player = CARDS_PER_DECK // env.n_players
-            opponent_counts = obs[cards_per_player+104:]
+            opponent_counts = obs[cards_per_player + 104 :]
             current = env.current_player
 
             # Verify counts match actual hand sizes
@@ -381,7 +379,7 @@ class TestEnv:
             if action.type != PASS:
                 played_cards.update(action.cards)
 
-            obs, _, _, _ = env.step(action)
+            obs, _ = env.step(action)
 
         # Verify seen cards match what was played
         for card in range(CARDS_PER_DECK):
@@ -437,7 +435,7 @@ class TestEnv:
             candidates = env.legal_candidates(env.current_player)
             action = candidates[0]
 
-            obs, _, _, _ = env.step(action)
+            obs, _ = env.step(action)
             moves += 1
 
             # If trick became fresh (was not None, now is None), a trick completed
@@ -478,7 +476,7 @@ class TestEnv:
                     action = c
                     break
 
-            obs, reward, done, info = env.step(action)
+            obs, done = env.step(action)
             moves += 1
 
             # Verify consistency
@@ -505,7 +503,6 @@ class TestEnv:
             if done:
                 assert env.winner == player  # Current player just won
                 assert len(env.hands[player]) == 0
-                assert reward == 1
 
         assert env.done
         assert moves < max_moves

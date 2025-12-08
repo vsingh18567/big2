@@ -6,11 +6,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn, optim
-
-from nn import MLPPolicy, combo_to_action_vector
-from simulator.cards import PASS, Combo, card_name
-from simulator.env import Big2Env
 from tqdm import tqdm
+
+from big2.nn import MLPPolicy, combo_to_action_vector
+from big2.simulator.cards import PASS, Combo, card_name
+from big2.simulator.env import Big2Env
 
 
 @dataclass
@@ -56,16 +56,20 @@ def episode(env: Big2Env, policy: MLPPolicy):
             candidates = [Combo(PASS, [], ())]
         action, logprob, entropy, value, max_logprob = select_action(policy, state, candidates)
 
-        hand_cards = env.hands[p]
-        hand_str = " ".join([card_name(c) for c in sorted(hand_cards)])
         if action.type == PASS:
             action_str = "PASS"
         else:
             action_str = " ".join([card_name(c) for c in action.cards])
 
-        next_state, reward, done, _ = env.step(action)
+        next_state, done = env.step(action)
+        if not done:
+            reward = 0.0
         # Store step
-        traj[p].append(StepRecord(logprob=logprob, entropy=entropy, value=value, reward=reward, max_logprob=max_logprob, action=action_str))
+        traj[p].append(
+            StepRecord(
+                logprob=logprob, entropy=entropy, value=value, reward=reward, max_logprob=max_logprob, action=action_str
+            )
+        )
         # Assign terminal rewards at the end
         if done:
             winner = env.winner
@@ -75,12 +79,14 @@ def episode(env: Big2Env, policy: MLPPolicy):
                 final_r = sum(len(env.hands[i]) for i in range(env.n_players) if i != q) if q == winner else 0.0
                 # set last step reward for each player (Monte Carlo return will propagate)
                 if len(traj[q]) > 0:
-                    traj[q][-1] = StepRecord(logprob=traj[q][-1].logprob,
-                                              entropy=traj[q][-1].entropy,
-                                              value=traj[q][-1].value,
-                                              reward=final_r,
-                                              max_logprob=traj[q][-1].max_logprob,
-                                              action=traj[q][-1].action)
+                    traj[q][-1] = StepRecord(
+                        logprob=traj[q][-1].logprob,
+                        entropy=traj[q][-1].entropy,
+                        value=traj[q][-1].value,
+                        reward=final_r,
+                        max_logprob=traj[q][-1].max_logprob,
+                        action=traj[q][-1].action,
+                    )
             break
         state = next_state
     return traj
@@ -112,7 +118,7 @@ def select_action_random(candidates: list[Combo]) -> Combo:
     return random.choice(candidates)
 
 
-def play_evaluation_game(current_policy: MLPPolicy, n_players: int, device="cpu") -> int:
+def play_evaluation_game(current_policy: MLPPolicy, n_players: int, device="cpu") -> int | None:
     """
     Play one game where player 0 uses current_policy and players 1-(n_players-1) use random policy.
     Returns the winner (0 if current policy wins, 1-(n_players-1) if random policy wins).
@@ -134,13 +140,10 @@ def play_evaluation_game(current_policy: MLPPolicy, n_players: int, device="cpu"
 
         state, _, _, _ = env.step(action)
 
-    assert env.winner is not None, "Game should have a winner"
     return env.winner
 
 
-def evaluate_against_random(
-    current_policy: MLPPolicy, n_players: int, num_games: int = 100, device="cpu"
-) -> float:
+def evaluate_against_random(current_policy: MLPPolicy, n_players: int, num_games: int = 100, device="cpu") -> float:
     """
     Evaluate current policy against random policy by playing num_games.
     Returns win rate of current policy (player 0).
@@ -154,10 +157,10 @@ def evaluate_against_random(
     win_rate = wins / num_games
     return win_rate
 
-def compute_gae_from_values(rewards: torch.Tensor,
-                            values: torch.Tensor,
-                            gamma: float = 0.99,
-                            lam: float = 0.95) -> tuple[torch.Tensor, torch.Tensor]:
+
+def compute_gae_from_values(
+    rewards: torch.Tensor, values: torch.Tensor, gamma: float = 0.99, lam: float = 0.95
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     rewards: [T]  (on that player's decision steps; typically 0,...,0, ±1 at the end)
     values:  [T]  (V(s_t) at each of those steps)
@@ -177,7 +180,20 @@ def compute_gae_from_values(rewards: torch.Tensor,
     returns = adv + values
     return adv, returns
 
-def train_selfplay(n_players=4, batches=2000, episodes_per_batch=10,lr=3e-4, entropy_beta=0.01, value_coef=0.5, gamma=1.0, seed=42, device='cpu', eval_interval=50, eval_games=100):
+
+def train_selfplay(
+    n_players=4,
+    batches=2000,
+    episodes_per_batch=10,
+    lr=3e-4,
+    entropy_beta=0.01,
+    value_coef=0.5,
+    gamma=1.0,
+    seed=42,
+    device="cpu",
+    eval_interval=50,
+    eval_games=100,
+):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -202,7 +218,6 @@ def train_selfplay(n_players=4, batches=2000, episodes_per_batch=10,lr=3e-4, ent
     win_rates = []
 
     for batch in tqdm(range(1, batches + 1)):
-        
         batch_logp, batch_val, batch_ret, batch_adv, batch_ent, batch_max_logp = [], [], [], [], [], []
         for _ in range(1, episodes_per_batch + 1):
             traj = episode(env, policy)
@@ -211,11 +226,11 @@ def train_selfplay(n_players=4, batches=2000, episodes_per_batch=10,lr=3e-4, ent
                     continue
 
                 # tensors
-                rewards_t   = torch.tensor([rec.reward  for rec in traj[p]], dtype=torch.float32, device=device) # [T]
-                values_t    = torch.stack([rec.value    for rec in traj[p]]).squeeze(-1)  # [T] (ensure 1D)
-                logprobs_t  = torch.stack([rec.logprob  for rec in traj[p]])              # [T]
-                entropies_t = torch.stack([rec.entropy  for rec in traj[p]])              # [T]
-                max_logprobs_t = torch.stack([rec.max_logprob for rec in traj[p]])       # [T]
+                rewards_t = torch.tensor([rec.reward for rec in traj[p]], dtype=torch.float32, device=device)  # [T]
+                values_t = torch.stack([rec.value for rec in traj[p]]).squeeze(-1)  # [T] (ensure 1D)
+                logprobs_t = torch.stack([rec.logprob for rec in traj[p]])  # [T]
+                entropies_t = torch.stack([rec.entropy for rec in traj[p]])  # [T]
+                max_logprobs_t = torch.stack([rec.max_logprob for rec in traj[p]])  # [T]
 
                 # GAE(lambda) returns
                 adv_t, ret_t = compute_gae_from_values(rewards_t, values_t, gamma=gamma, lam=0.95)
@@ -228,19 +243,19 @@ def train_selfplay(n_players=4, batches=2000, episodes_per_batch=10,lr=3e-4, ent
                 batch_max_logp.append(max_logprobs_t)
 
         # concat
-        logp  = torch.cat(batch_logp)
+        logp = torch.cat(batch_logp)
         vpred = torch.cat(batch_val)
-        ret   = torch.cat(batch_ret)
-        adv   = torch.cat(batch_adv)
-        ent   = torch.cat(batch_ent)
+        ret = torch.cat(batch_ret)
+        adv = torch.cat(batch_adv)
+        ent = torch.cat(batch_ent)
         max_logp = torch.cat(batch_max_logp)
 
         # normalize advantages across the batch
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
         policy_loss = -(logp * adv).mean()
-        value_loss  = F.mse_loss(vpred, ret)
-        entropy     = ent.mean()
+        value_loss = F.mse_loss(vpred, ret)
+        entropy = ent.mean()
         avg_max_logprob = max_logp.mean()
 
         loss = policy_loss - entropy_beta * entropy
@@ -252,7 +267,7 @@ def train_selfplay(n_players=4, batches=2000, episodes_per_batch=10,lr=3e-4, ent
         # Anneal learning rate linearly
         new_lr = initial_lr - (batch * lr_decay)
         for param_group in optimizer.param_groups:
-            param_group['lr'] = new_lr
+            param_group["lr"] = new_lr
 
         # Record losses
         loss_history.append(loss.item())
@@ -261,7 +276,7 @@ def train_selfplay(n_players=4, batches=2000, episodes_per_batch=10,lr=3e-4, ent
         entropy_history.append(entropy.item())
         max_logprob_history.append(avg_max_logprob.item())
 
-            # Evaluation every eval_interval episodes
+        # Evaluation every eval_interval episodes
         if batch % eval_interval == 0:
             avg_len = sum(len(traj[p]) for p in range(n_players)) / n_players
 
@@ -270,18 +285,30 @@ def train_selfplay(n_players=4, batches=2000, episodes_per_batch=10,lr=3e-4, ent
             policy.eval()
             win_rate = evaluate_against_random(policy, n_players, num_games=eval_games, device=device)
             policy.train()
-            
+
             eval_episodes.append(batch)
             win_rates.append(win_rate)
-            
+
             print(f"[Step {batch}] Win rate vs random: {win_rate:.2%} ({int(win_rate * eval_games)}/{eval_games} wins)")
-            print(f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}\n")
+            print(
+                f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} "
+                f"val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}\n"
+            )
 
             save_path = f"big2_model_step_{batch}.pt"
             torch.save(policy.state_dict(), save_path)
             print(f"Checkpoint saved to {save_path}")
-            
-    return policy, loss_history, policy_loss_history, value_loss_history, entropy_history, max_logprob_history, eval_episodes, win_rates
+
+    return (
+        policy,
+        loss_history,
+        policy_loss_history,
+        value_loss_history,
+        entropy_history,
+        max_logprob_history,
+        eval_episodes,
+        win_rates,
+    )
 
 
 def plot_training_curves(
@@ -309,9 +336,13 @@ def plot_training_curves(
     else:
         fig = plt.figure(figsize=(16, 10))
         gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
-        axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1]), 
-                fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1]),
-                fig.add_subplot(gs[0, 2])]
+        axes = [
+            fig.add_subplot(gs[0, 0]),
+            fig.add_subplot(gs[0, 1]),
+            fig.add_subplot(gs[1, 0]),
+            fig.add_subplot(gs[1, 1]),
+            fig.add_subplot(gs[0, 2]),
+        ]
 
     fig.suptitle("Big 2 Training Curves", fontsize=16, fontweight="bold")
 
@@ -382,7 +413,9 @@ def plot_training_curves(
     plt.close()
 
 
-def value_of_starting_hand(policy: MLPPolicy, hand: list[int], n_players: int = 4, sims: int = 512, device="cpu") -> float:
+def value_of_starting_hand(
+    policy: MLPPolicy, hand: list[int], n_players: int = 4, sims: int = 512, device="cpu"
+) -> float:
     # Monte Carlo rollouts with frozen policy; returns expected terminal reward for seat 0 with given starting hand
     wins = 0.0
     cards_per_player = 52 // n_players
@@ -427,15 +460,33 @@ def value_of_starting_hand(policy: MLPPolicy, hand: list[int], n_players: int = 
             state = next_state
     return wins / sims
 
-if __name__ == '__main__':
-    device = "cuda" if torch.cuda.is_available() else 'cpu'
+
+if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     n_players = 2  # Can be changed to 2, 3, or 4
     cards_per_player = 52 // n_players
-    
-    policy, loss_history, policy_loss_history, value_loss_history, entropy_history, max_logprob_history, eval_episodes, win_rates = train_selfplay(
-        n_players=n_players, batches=200, episodes_per_batch=16, lr=0.004, entropy_beta=0.01,
-        value_coef=0.5, gamma=0.99, seed=42, device=device,
-        eval_interval=50, eval_games=100
+
+    (
+        policy,
+        loss_history,
+        policy_loss_history,
+        value_loss_history,
+        entropy_history,
+        max_logprob_history,
+        eval_episodes,
+        win_rates,
+    ) = train_selfplay(
+        n_players=n_players,
+        batches=200,
+        episodes_per_batch=16,
+        lr=0.004,
+        entropy_beta=0.01,
+        value_coef=0.5,
+        gamma=0.99,
+        seed=42,
+        device=device,
+        eval_interval=50,
+        eval_games=100,
     )
 
     hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
@@ -455,5 +506,11 @@ if __name__ == '__main__':
 
     # Plot and save training curves
     plot_training_curves(
-        loss_history, policy_loss_history, value_loss_history, entropy_history, max_logprob_history, eval_episodes, win_rates
+        loss_history,
+        policy_loss_history,
+        value_loss_history,
+        entropy_history,
+        max_logprob_history,
+        eval_episodes,
+        win_rates,
     )

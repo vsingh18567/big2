@@ -6,9 +6,9 @@ Interactive Big 2 game where you play against trained AI models.
 import numpy as np
 import torch
 
-from nn import MLPPolicy, combo_to_action_vector
-from simulator.cards import PAIR, PASS, SINGLE, TRIPLE, Combo, card_name
-from simulator.env import Big2Env
+from big2.nn import MLPPolicy, combo_to_action_vector
+from big2.simulator.cards import PAIR, PASS, SINGLE, TRIPLE, Combo, card_name
+from big2.simulator.env import Big2Env
 
 
 def format_combo(combo: Combo) -> str:

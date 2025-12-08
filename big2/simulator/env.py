@@ -2,7 +2,7 @@ import random
 
 import numpy as np
 
-from .cards import (
+from big2.simulator.cards import (
     CARDS_PER_DECK,
     PAIR,
     PASS,
@@ -12,7 +12,7 @@ from .cards import (
     compare_combos,
     hand_to_combo,
 )
-from .generate_hands import COMBO_GENERATORS
+from big2.simulator.generate_hands import COMBO_GENERATORS
 
 
 class Big2Env:
@@ -49,7 +49,6 @@ class Big2Env:
 
     def _obs(self, player: int) -> np.ndarray:
         """Converts the internal game state into a numpy array"""
-        # cards_per_player scalars for current hand, -1 padded; last-play 52 one-hot; seen 52; opponents counts (n_players-1)
         cards_per_player = CARDS_PER_DECK // self.n_players
         hand = self.hands[player]
         hand_ids = hand + [-1] * (cards_per_player - len(hand))
@@ -73,16 +72,14 @@ class Big2Env:
         hand = self.hands[player]
         candidates: list[Combo] = []
 
-        # If the player currently has the 3 of diamonds, they must include it to start
+        # Generate all possible combos from the current hand
         all_sets = []
-        must_include_three_of_diamonds = False
-        if 0 in hand:
-            must_include_three_of_diamonds = True
-        for _t, gen in COMBO_GENERATORS.items():
+        for _, gen in COMBO_GENERATORS.items():
             for cards in gen(hand):
                 cmb = hand_to_combo(cards)
                 if cmb is not None:
-                    if must_include_three_of_diamonds and 0 not in cmb.cards:
+                    # If the player currently has the 3 of diamonds, they must include it to start
+                    if 0 in hand and 0 not in cmb.cards:
                         continue
                     all_sets.append(cmb)
 
@@ -115,17 +112,15 @@ class Big2Env:
 
         return candidates
 
-    def step(self, action: Combo) -> tuple[np.ndarray, float, bool, dict]:
+    def step(self, action: Combo) -> tuple[np.ndarray, bool]:
         """Updates the game state according to a trick played by the current player"""
         player_hand = self.hands[self.current_player]
-        reward = 0
         if action.type == PASS:
             self.passes_in_row += 1
-            # If this player was the 3rd pass in a row, the next player has control
-            if self.passes_in_row >= self.n_players - 1:
+            # If this player was the last to pass, the next player has control
+            if self.passes_in_row == self.n_players - 1:
                 self.trick_pile = None
                 self.passes_in_row = 0
-
         else:
             for c in action.cards:
                 player_hand.remove(c)
@@ -135,9 +130,9 @@ class Big2Env:
             if len(player_hand) == 0:
                 self.done = True
                 self.winner = self.current_player
-        
+
         # If not done, advance the current player
         if not self.done:
             self.current_player = (self.current_player + 1) % self.n_players
 
-        return self._obs(self.current_player), reward, self.done, {}
+        return self._obs(self.current_player), self.done

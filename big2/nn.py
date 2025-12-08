@@ -3,21 +3,22 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from simulator.cards import PASS, Combo
+from big2.simulator.cards import PASS, Combo
 
 DROPOUT_RATE = 0.1
 
 
 def input_dim(n_players: int = 4) -> int:
     """Calculate input dimension based on number of players.
-    
+
     Returns:
         cards_per_player + 52 (last_play) + 52 (seen) + (n_players - 1) (opponent counts)
     """
     cards_per_player = 52 // n_players
     return cards_per_player + 52 + 52 + (n_players - 1)
 
-def combo_to_action_vector(cmb: Combo) -> tuple[np.ndarray]:
+
+def combo_to_action_vector(cmb: Combo) -> np.ndarray:
     # 52 one-hot for cards used
     vec = np.zeros(52 + 1, dtype=np.float32)
     if cmb.type == PASS:
@@ -30,7 +31,7 @@ def combo_to_action_vector(cmb: Combo) -> tuple[np.ndarray]:
 
 
 class MLPPolicy(nn.Module):
-    def __init__(self, n_players: int = 4, card_vocab=53, card_emb_dim=32, hidden=512, action_hidden=256, device='cpu'):
+    def __init__(self, n_players: int = 4, card_vocab=53, card_emb_dim=32, hidden=512, action_hidden=256, device="cpu"):
         super().__init__()
         self.device = device
         self.n_players = n_players
@@ -63,20 +64,16 @@ class MLPPolicy(nn.Module):
             nn.Linear(hidden + action_hidden, hidden), nn.ReLU(), nn.Dropout(DROPOUT_RATE), nn.Linear(hidden, 1)
         )
         # Value head
-        self.value_head = nn.Sequential(
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, 1)
-        )
+        self.value_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 1))
 
     def forward_state(self, state_tensor: torch.Tensor) -> torch.Tensor:
         # state_tensor shape: (B, input_dim) ints
         B = state_tensor.shape[0]
         # Split
-        hand_ids = state_tensor[:, :self.cards_per_player].clone()
-        last_play = state_tensor[:, self.cards_per_player:self.cards_per_player+52].float()
-        seen = state_tensor[:, self.cards_per_player+52:self.cards_per_player+104].float()
-        counts = state_tensor[:, self.cards_per_player+104:].float()
+        hand_ids = state_tensor[:, : self.cards_per_player].clone()
+        last_play = state_tensor[:, self.cards_per_player : self.cards_per_player + 52].float()
+        seen = state_tensor[:, self.cards_per_player + 52 : self.cards_per_player + 104].float()
+        counts = state_tensor[:, self.cards_per_player + 104 :].float()
         # Map -1 → pad_id
         hand_ids[hand_ids < 0] = self.pad_id
         emb = self.card_emb(hand_ids.long())  # (B,13,E)

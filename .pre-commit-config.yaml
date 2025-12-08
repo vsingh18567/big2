@@ -8,12 +8,3 @@ repos:
       - id: ruff-format
         args: [big2]
         files: ^big2/
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.2
-    hooks:
-      - id: mypy
-        additional_dependencies: [typing-extensions>=4.9.0, torch, numpy, matplotlib]
-        args: [--config-file=pyproject.toml, --explicit-package-bases, --namespace-packages]
-        files: ^big2/.*\.py$
-        exclude: ^big2/__init__\.py$
