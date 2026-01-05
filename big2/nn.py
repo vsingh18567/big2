@@ -13,9 +13,10 @@ def input_dim(n_players: int = 4) -> int:
 
     Returns:
         cards_per_player + 52 (last_play) + 52 (seen) + (n_players - 1) (opponent counts)
+        + 1 (passes_in_row) + (n_players - 1) * 52 (opponent cards)
     """
     cards_per_player = 52 // n_players
-    return cards_per_player + 52 + 52 + (n_players - 1)
+    return cards_per_player + 52 + 52 + (n_players - 1) + 1 + (n_players - 1) * 52
 
 
 def combo_to_action_vector(cmb: Combo) -> np.ndarray:
@@ -31,7 +32,9 @@ def combo_to_action_vector(cmb: Combo) -> np.ndarray:
 
 
 class MLPPolicy(nn.Module):
-    def __init__(self, n_players: int = 4, card_vocab=53, card_emb_dim=32, hidden=512, action_hidden=256, device="cpu"):
+    def __init__(
+        self, n_players: int = 4, card_vocab=53, card_emb_dim=32, hidden=1024, action_hidden=256, device="cpu"
+    ):
         super().__init__()
         self.device = device
         self.n_players = n_players
@@ -45,9 +48,11 @@ class MLPPolicy(nn.Module):
         self.last_play_enc = nn.Linear(52, hidden)
         self.seen_enc = nn.Linear(52, hidden)
         self.counts_enc = nn.Linear(n_players - 1, hidden // 2)
+        self.passes_enc = nn.Linear(1, hidden // 4)
+        self.opponent_cards_enc = nn.Linear((n_players - 1) * 52, hidden)
 
         # State trunk
-        self.state_proj = nn.Linear(hidden + hidden + hidden + hidden // 2, hidden)
+        self.state_proj = nn.Linear(hidden + hidden + hidden + hidden // 2 + hidden // 4 + hidden, hidden)
         self.state_ln = nn.LayerNorm(hidden)
 
         # Action encoder: 52 one-hot + type one-hot(9) + size scalar(1) + key features (up to 3 ints) → MLP
@@ -64,7 +69,9 @@ class MLPPolicy(nn.Module):
             nn.Linear(hidden + action_hidden, hidden), nn.ReLU(), nn.Dropout(DROPOUT_RATE), nn.Linear(hidden, 1)
         )
         # Value head
-        self.value_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 1))
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, hidden // 2), nn.ReLU(), nn.Linear(hidden // 2, 1)
+        )
 
     def forward_state(self, state_tensor: torch.Tensor) -> torch.Tensor:
         # state_tensor shape: (B, input_dim) ints
@@ -73,7 +80,13 @@ class MLPPolicy(nn.Module):
         hand_ids = state_tensor[:, : self.cards_per_player].clone()
         last_play = state_tensor[:, self.cards_per_player : self.cards_per_player + 52].float()
         seen = state_tensor[:, self.cards_per_player + 52 : self.cards_per_player + 104].float()
-        counts = state_tensor[:, self.cards_per_player + 104 :].float()
+        counts_start = self.cards_per_player + 104
+        counts_end = counts_start + (self.n_players - 1)
+        counts = state_tensor[:, counts_start:counts_end].float()
+        passes_start = counts_end
+        passes_end = passes_start + 1
+        passes = state_tensor[:, passes_start:passes_end].float()
+        opponent_cards = state_tensor[:, passes_end:].float()
         # Map -1 → pad_id
         hand_ids[hand_ids < 0] = self.pad_id
         emb = self.card_emb(hand_ids.long())  # (B,13,E)
@@ -81,7 +94,9 @@ class MLPPolicy(nn.Module):
         lp = F.relu(self.last_play_enc(last_play))
         sn = F.relu(self.seen_enc(seen))
         ct = F.relu(self.counts_enc(counts))
-        x = torch.cat([embedding_enc, lp, sn, ct], dim=-1)
+        ps = F.relu(self.passes_enc(passes))
+        oc = F.relu(self.opponent_cards_enc(opponent_cards))
+        x = torch.cat([embedding_enc, lp, sn, ct, ps, oc], dim=-1)
         h = F.relu(self.state_proj(x))
         h = self.state_ln(h)
         return h  # (B, hidden)

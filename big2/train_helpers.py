@@ -7,8 +7,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch import nn, optim
-from tqdm import tqdm
 
 from big2.nn import MLPPolicy, combo_to_action_vector
 from big2.simulator.cards import PASS, Combo, card_name
@@ -269,6 +267,7 @@ class CheckpointManager:
         self.n_players = n_players
         self.checkpoints: list[tuple[int, MLPPolicy]] = []  # (step, policy)
         self.max_checkpoints = 20  # Keep last 20 checkpoints
+        self.greedy_schedule_stage = 0  # 0: <20%, 1: 20-30%, 2: >=30%
 
     def add_checkpoint(self, step: int, policy: MLPPolicy):
         """Add a checkpoint to the pool."""
@@ -283,22 +282,55 @@ class CheckpointManager:
         if len(self.checkpoints) > self.max_checkpoints:
             self.checkpoints.pop(0)
 
-    def sample_opponent_policy(self, current_policy: MLPPolicy, current_step: int) -> MLPPolicy | Callable:
+    def update_greedy_schedule(self, win_rate: float):
         """
-        Sample an opponent policy/strategy. Returns either a policy or a callable strategy function.
+        Update the greedy schedule stage based on win rate against greedy.
+        Schedule only advances forward (never regresses).
+
+        Stage 0: win_rate < 0.20 → greedy 50%
+        Stage 1: 0.20 ≤ win_rate < 0.30 → greedy 25%
+        Stage 2: win_rate ≥ 0.30 → greedy 15%
+        """
+        if win_rate >= 0.30 and self.greedy_schedule_stage < 2:
+            self.greedy_schedule_stage = 2
+        elif win_rate >= 0.20 and self.greedy_schedule_stage < 1:
+            self.greedy_schedule_stage = 1
+
+    def sample_opponent_policy(self, current_policy: MLPPolicy) -> MLPPolicy | Callable:
+        """
+        Sample an opponent policy/strategy based on the current greedy schedule stage.
+        Returns either a policy or a callable strategy function.
         This version is used in episode() where we need the actual state.
         """
         r = random.random()
-        if r < 0.5:
-            # Current policy (self-play)
-            return current_policy
-        elif r < 0.75 and len(self.checkpoints) > 0:
-            # Past checkpoints (last 10)
-            _, checkpoint_policy = random.choice(self.checkpoints[-3:])
-            return checkpoint_policy
-        else:
+
+        # Determine probabilities based on schedule stage
+        if self.greedy_schedule_stage == 0:
+            # Stage 0: <20% win rate → greedy 50%, current 37.5%, checkpoints 12.5%
+            greedy_prob = 0.5
+            current_prob = 0.375
+        elif self.greedy_schedule_stage == 1:
+            # Stage 1: 20-30% win rate → greedy 25%, current 56.25%, checkpoints 18.75%
+            greedy_prob = 0.25
+            current_prob = 0.5625
+        else:  # stage == 2
+            # Stage 2: >=30% win rate → greedy 10%, current 70%, checkpoints 20%
+            greedy_prob = 0.1
+            current_prob = 0.7
+
+        if r < greedy_prob:
             # Greedy baseline
             return greedy_strategy
+        elif r < greedy_prob + current_prob:
+            # Current policy (self-play)
+            return current_policy
+        elif len(self.checkpoints) > 0:
+            # Past checkpoints (last 5)
+            _, checkpoint_policy = random.choice(self.checkpoints[-5:])
+            return checkpoint_policy
+        else:
+            # Fallback to current policy if no checkpoints available
+            return current_policy
 
 
 def compute_gae_from_values(
@@ -325,190 +357,6 @@ def compute_gae_from_values(
         adv[t] = gae
     returns = adv + values_detached
     return adv, returns
-
-
-def train_selfplay(
-    n_players=4,
-    batches=2000,
-    episodes_per_batch=10,
-    lr=1e-3,
-    entropy_beta=0.01,
-    value_coef=0.5,
-    gamma=1.0,
-    seed=42,
-    device="cpu",
-    eval_interval=50,
-    eval_games=500,
-):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    # Opponent sampling: 50% current policy, 30% past checkpoints, 20% greedy
-    # Model players are always player 0, opponents are players 1 to n_players-1
-    model_players = {0}
-    opponent_players = set(range(1, n_players))
-
-    print(f"Model players: {sorted(model_players)}, Opponent players: {sorted(opponent_players)}")
-    print("Opponent mixture: 50% current policy, 30% past checkpoints, 20% greedy baseline")
-
-    env = Big2Env(n_players)
-    policy = MLPPolicy(n_players=n_players, device=device).to(device)
-    optimizer = optim.Adam(policy.parameters(), lr=lr)
-
-    # Checkpoint manager for opponent sampling
-    checkpoint_manager = CheckpointManager(device=device, n_players=n_players)
-
-    # Learning rate scheduler: warmup + cosine annealing
-    warmup_batches = batches // 10  # 10% warmup
-
-    def lr_lambda(current_batch):
-        if current_batch < warmup_batches:
-            # Linear warmup
-            return current_batch / warmup_batches
-        else:
-            # Cosine annealing after warmup
-            progress = (current_batch - warmup_batches) / (batches - warmup_batches)
-            return 0.5 * (1 + np.cos(np.pi * progress))
-
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    # Adaptive entropy coefficient
-    current_entropy_beta = entropy_beta
-    target_entropy = 0.5  # Target entropy level
-    entropy_beta_min = 0.005
-    entropy_beta_max = 0.1
-
-    # Track losses for plotting
-    loss_history = []
-    policy_loss_history = []
-    value_loss_history = []
-    entropy_history = []
-    max_logprob_history = []
-
-    # Track evaluation metrics
-    eval_episodes = []
-    win_rates = []
-
-    for batch in tqdm(range(1, batches + 1)):
-        batch_logp, batch_val, batch_ret, batch_adv, batch_ent, batch_max_logp = [], [], [], [], [], []
-        for _ in range(1, episodes_per_batch + 1):
-            # Sample opponents for this episode
-            opponent_strategies = dict.fromkeys(opponent_players)
-            for opp_id in opponent_players:
-                opponent_strategies[opp_id] = checkpoint_manager.sample_opponent_policy(policy, batch)
-            traj = episode(env, policy, opponent_strategies=opponent_strategies, model_players=model_players)
-
-            for p in model_players:
-                if len(traj[p]) == 0:
-                    continue
-
-                # tensors
-                rewards_t = torch.tensor([rec.reward for rec in traj[p]], dtype=torch.float32, device=device)  # [T]
-                values_t = torch.stack([rec.value for rec in traj[p]]).squeeze(-1)  # [T] (ensure 1D)
-                logprobs_t = torch.stack([rec.logprob for rec in traj[p]])  # [T]
-                entropies_t = torch.stack([rec.entropy for rec in traj[p]])  # [T]
-                max_logprobs_t = torch.stack([rec.max_logprob for rec in traj[p]])  # [T]
-
-                # GAE(lambda) returns
-                adv_t, ret_t = compute_gae_from_values(rewards_t, values_t, gamma=gamma, lam=0.95)
-
-                batch_logp.append(logprobs_t)
-                batch_val.append(values_t)
-                batch_ret.append(ret_t.detach())
-                batch_adv.append(adv_t)
-                batch_ent.append(entropies_t)
-                batch_max_logp.append(max_logprobs_t)
-
-        # concat
-        logp = torch.cat(batch_logp)
-        vpred = torch.cat(batch_val)
-        ret = torch.cat(batch_ret)
-        adv = torch.cat(batch_adv)
-        ent = torch.cat(batch_ent)
-        max_logp = torch.cat(batch_max_logp)
-
-        # normalize advantages across the batch
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-
-        policy_loss = -(logp * adv).mean()
-        value_loss = F.mse_loss(vpred, ret)
-        entropy = ent.mean()
-        avg_max_logprob = max_logp.mean()
-
-        loss = policy_loss + value_coef * value_loss - current_entropy_beta * entropy
-        optimizer.zero_grad()
-        loss.backward()
-        nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
-        optimizer.step()
-
-        # Step the learning rate scheduler
-        scheduler.step()
-
-        # Adaptive entropy coefficient: adjust based on current entropy
-        if entropy.item() < target_entropy - 0.1:
-            # Entropy too low, encourage more exploration
-            current_entropy_beta = min(entropy_beta_max, current_entropy_beta * 1.02)
-        elif entropy.item() > target_entropy + 0.1:
-            # Entropy too high, allow more exploitation
-            current_entropy_beta = max(entropy_beta_min, current_entropy_beta * 0.98)
-
-        # Record losses
-        loss_history.append(loss.item())
-        policy_loss_history.append(policy_loss.item())
-        value_loss_history.append(value_loss.item())
-        entropy_history.append(entropy.item())
-        max_logprob_history.append(avg_max_logprob.item())
-
-        # Evaluation every eval_interval episodes
-        if batch % eval_interval == 0:
-            avg_len = sum(len(traj[p]) for p in model_players) / len(model_players) if model_players else 0
-
-            # Comprehensive evaluation
-            print(f"\n[Step {batch}] Evaluating policy...")
-            policy.eval()
-            metrics = evaluate_against_greedy(policy, n_players, num_games=eval_games, device=device)
-            policy.train()
-
-            eval_episodes.append(batch)
-            win_rates.append(metrics.win_rate_vs_greedy)
-
-            print(f"[Step {batch}] Evaluation Results ({metrics.total_games} games):")
-            wins_vs_greedy = int(metrics.win_rate_vs_greedy * metrics.total_games)
-            wr_str = f"  Win rate vs greedy: {metrics.win_rate_vs_greedy:.2%}"
-            wr_str += f" ({wins_vs_greedy}/{metrics.total_games} wins)"
-            print(wr_str)
-            print(f"  Win rate vs random: {metrics.win_rate_vs_random:.2%}")
-            print(f"  Avg cards remaining when losing: {metrics.avg_cards_remaining_when_losing:.2f}")
-            print("  Win rate by starting position:")
-            for pos, wr in sorted(metrics.win_rate_by_starting_position.items()):
-                print(f"    Position {pos}: {wr:.2%}")
-            current_lr = scheduler.get_last_lr()[0]
-            print(
-                f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} "
-                f"val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}"
-            )
-            print(f"[Step {batch}] lr={current_lr:.6f} ent_beta={current_entropy_beta:.4f}")
-            n_checkpoints = len(checkpoint_manager.checkpoints)
-            print(f"[Step {batch}] Checkpoints in pool: {n_checkpoints}\n")
-
-            # Save checkpoint and add to manager
-            save_path = f"big2_model_step_{batch}.pt"
-            torch.save(policy.state_dict(), save_path)
-            print(f"Checkpoint saved to {save_path}")
-
-            checkpoint_manager.add_checkpoint(batch, policy)
-
-    return (
-        policy,
-        loss_history,
-        policy_loss_history,
-        value_loss_history,
-        entropy_history,
-        max_logprob_history,
-        eval_episodes,
-        win_rates,
-    )
 
 
 def plot_training_curves(
@@ -659,62 +507,3 @@ def value_of_starting_hand(
                 break
             state = next_state
     return wins / sims
-
-
-if __name__ == "__main__":
-    if torch.cuda.is_available():
-        device = "cuda"
-    else:
-        device = "cpu"
-    print(f"Using device: {device}")
-    n_players = 4  # Greedy opponents adapt based on win rate: 3 -> 2 -> 0
-    cards_per_player = 52 // n_players
-
-    (
-        policy,
-        loss_history,
-        policy_loss_history,
-        value_loss_history,
-        entropy_history,
-        max_logprob_history,
-        eval_episodes,
-        win_rates,
-    ) = train_selfplay(
-        n_players=n_players,
-        batches=250,
-        episodes_per_batch=64,  # Increased from 16 for more stable gradients
-        lr=0.0003,
-        entropy_beta=0.02,
-        value_coef=0.5,
-        gamma=0.99,
-        seed=42,
-        device=device,
-        eval_interval=25,
-        eval_games=250,
-    )
-
-    hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
-    val = value_of_starting_hand(policy, hand, n_players=n_players, sims=64, device=device)
-    print("Random starting hand:", [card_name(c) for c in hand])
-    print("Win rate:", val)
-
-    hand = sorted(random.sample(range(52), cards_per_player))
-    val = value_of_starting_hand(policy, hand, n_players=n_players, sims=64, device=device)
-    print("Random starting hand:", [card_name(c) for c in hand])
-    print("Win rate:", val)
-
-    # Save the trained model
-    save_path = "big2_model.pt"
-    torch.save(policy.state_dict(), save_path)
-    print(f"\nModel weights saved to {save_path}")
-
-    # Plot and save training curves
-    plot_training_curves(
-        loss_history,
-        policy_loss_history,
-        value_loss_history,
-        entropy_history,
-        max_logprob_history,
-        eval_episodes,
-        win_rates,
-    )
