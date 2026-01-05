@@ -199,7 +199,7 @@ def main():
         print("\n\nGame interrupted. Thanks for playing!")
     except FileNotFoundError:
         print(f"\n❌ Error: Model file '{model_path}' not found.")
-        print("Please train a model first by running: python train.py")
+        print("Please train a model first by running: python -m big2.train_reinforce or python -m big2.train_ppo")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback

@@ -44,6 +44,7 @@ class Big2Env:
         self.passes_in_row: int = 0
         self.done: bool = False
         self.winner: int | None = None
+        self.cards_played_by_player: list[list[int]] = [[] for _ in range(self.n_players)]
 
         return self._obs(self.current_player)
 
@@ -63,7 +64,17 @@ class Big2Env:
         counts = []
         for i in range(1, self.n_players):
             counts.append(len(self.hands[(player + i) % self.n_players]))
-        state = np.array(hand_ids + last_play + seen + counts, dtype=np.int32)
+
+        # Per-opponent card vectors (which cards each opponent has played)
+        opponent_cards = []
+        for i in range(1, self.n_players):
+            opp_id = (player + i) % self.n_players
+            opp_cards_vec = [0] * 52
+            for c in self.cards_played_by_player[opp_id]:
+                opp_cards_vec[c] = 1
+            opponent_cards.extend(opp_cards_vec)
+
+        state = np.array(hand_ids + last_play + seen + counts + [self.passes_in_row] + opponent_cards, dtype=np.int32)
 
         return state
 
@@ -125,6 +136,7 @@ class Big2Env:
             for c in action.cards:
                 player_hand.remove(c)
                 self.seen[c] = 1
+            self.cards_played_by_player[self.current_player].extend(action.cards)
             self.trick_pile = action
             self.passes_in_row = 0
             if len(player_hand) == 0:
