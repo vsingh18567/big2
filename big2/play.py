@@ -9,6 +9,7 @@ import torch
 from big2.nn import MLPPolicy, combo_to_action_vector
 from big2.simulator.cards import PAIR, PASS, SINGLE, TRIPLE, Combo, card_name
 from big2.simulator.env import Big2Env
+from big2.simulator.greedy_strategy import greedy_strategy
 
 
 def format_combo(combo: Combo) -> str:
@@ -62,7 +63,7 @@ def get_human_choice(candidates: list[Combo], hand: list[int]) -> Combo:
     """Get the human player's choice from legal candidates."""
     print("\n📋 Legal moves:")
     for i, combo in enumerate(candidates):
-        print(f"  {i+1}. {format_combo(combo)}")
+        print(f"  {i + 1}. {format_combo(combo)}")
 
     while True:
         try:
@@ -140,7 +141,8 @@ def play_interactive_game(model_path: str = "big2_model.pt", n_players: int = 4,
 
             # Get human choice
             action = get_human_choice(candidates, env.hands[current_player])
-
+            print(f"You played: {format_combo(action)}")
+            print(f"Greedy strategy would have played: {format_combo(greedy_strategy(candidates))}")
             if action.type != PASS:
                 last_trick_player = current_player
 
@@ -158,7 +160,7 @@ def play_interactive_game(model_path: str = "big2_model.pt", n_players: int = 4,
                 last_trick_player = current_player
 
         # Execute the action
-        state, reward, done, _ = env.step(action)
+        state, done = env.step(action)
 
         # Check if trick was cleared
         if env.trick_pile is None or env.trick_pile.type == PASS:

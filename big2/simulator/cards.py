@@ -24,6 +24,14 @@ class Combo:
     def __str__(self) -> str:
         return f"{self.type} {self.cards} {self.key}"
 
+    def __eq__(self, other: "Combo") -> bool:
+        return self.type == other.type and self.key == other.key
+
+    def __lt__(self, other: "Combo") -> bool:
+        if self.type != other.type:
+            return self.type < other.type
+        return self.key < other.key
+
 
 # Card utils
 
