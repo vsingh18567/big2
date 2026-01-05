@@ -294,7 +294,7 @@ class CheckpointManager:
             return current_policy
         elif r < 0.75 and len(self.checkpoints) > 0:
             # Past checkpoints (last 10)
-            _, checkpoint_policy = random.choice(self.checkpoints[-10:])
+            _, checkpoint_policy = random.choice(self.checkpoints[-3:])
             return checkpoint_policy
         else:
             # Greedy baseline
@@ -305,22 +305,25 @@ def compute_gae_from_values(
     rewards: torch.Tensor, values: torch.Tensor, gamma: float = 0.99, lam: float = 0.95
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
+    Compute Generalized Advantage Estimation (GAE).
+
     rewards: [T]  (on that player's decision steps; typically 0,...,0, ±1 at the end)
     values:  [T]  (V(s_t) at each of those steps)
-    returns: [T]  = advantages + values
+    returns: [T]  = advantages + values (used as targets for value function)
     """
     T = values.size(0)
-    values = torch.zeros_like(values)
+    # Detach values to avoid backprop through advantage computation
+    values_detached = values.detach()
     # v_next is values shifted left, with 0 bootstrap at the last step (episode end)
-    v_next = torch.cat([values[1:], torch.zeros(1, device=values.device, dtype=values.dtype)])
-    deltas = rewards + gamma * v_next - values
+    v_next = torch.cat([values_detached[1:], torch.zeros(1, device=values.device, dtype=values.dtype)])
+    deltas = rewards + gamma * v_next - values_detached
 
-    adv = torch.zeros_like(values)
+    adv = torch.zeros_like(values_detached)
     gae = 0.0
     for t in range(T - 1, -1, -1):
         gae = deltas[t] + gamma * lam * gae
         adv[t] = gae
-    returns = adv + values
+    returns = adv + values_detached
     return adv, returns
 
 
@@ -356,9 +359,25 @@ def train_selfplay(
     # Checkpoint manager for opponent sampling
     checkpoint_manager = CheckpointManager(device=device, n_players=n_players)
 
-    # Learning rate annealing
-    initial_lr = lr
-    lr_decay = initial_lr / batches
+    # Learning rate scheduler: warmup + cosine annealing
+    warmup_batches = batches // 10  # 10% warmup
+
+    def lr_lambda(current_batch):
+        if current_batch < warmup_batches:
+            # Linear warmup
+            return current_batch / warmup_batches
+        else:
+            # Cosine annealing after warmup
+            progress = (current_batch - warmup_batches) / (batches - warmup_batches)
+            return 0.5 * (1 + np.cos(np.pi * progress))
+
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    # Adaptive entropy coefficient
+    current_entropy_beta = entropy_beta
+    target_entropy = 0.5  # Target entropy level
+    entropy_beta_min = 0.005
+    entropy_beta_max = 0.1
 
     # Track losses for plotting
     loss_history = []
@@ -417,16 +436,22 @@ def train_selfplay(
         entropy = ent.mean()
         avg_max_logprob = max_logp.mean()
 
-        loss = policy_loss - entropy_beta * entropy
+        loss = policy_loss + value_coef * value_loss - current_entropy_beta * entropy
         optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
         optimizer.step()
 
-        # Anneal learning rate linearly
-        new_lr = initial_lr - (batch * lr_decay)
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = new_lr
+        # Step the learning rate scheduler
+        scheduler.step()
+
+        # Adaptive entropy coefficient: adjust based on current entropy
+        if entropy.item() < target_entropy - 0.1:
+            # Entropy too low, encourage more exploration
+            current_entropy_beta = min(entropy_beta_max, current_entropy_beta * 1.02)
+        elif entropy.item() > target_entropy + 0.1:
+            # Entropy too high, allow more exploitation
+            current_entropy_beta = max(entropy_beta_min, current_entropy_beta * 0.98)
 
         # Record losses
         loss_history.append(loss.item())
@@ -458,10 +483,12 @@ def train_selfplay(
             print("  Win rate by starting position:")
             for pos, wr in sorted(metrics.win_rate_by_starting_position.items()):
                 print(f"    Position {pos}: {wr:.2%}")
+            current_lr = scheduler.get_last_lr()[0]
             print(
                 f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} "
                 f"val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}"
             )
+            print(f"[Step {batch}] lr={current_lr:.6f} ent_beta={current_entropy_beta:.4f}")
             n_checkpoints = len(checkpoint_manager.checkpoints)
             print(f"[Step {batch}] Checkpoints in pool: {n_checkpoints}\n")
 
@@ -654,8 +681,8 @@ if __name__ == "__main__":
         win_rates,
     ) = train_selfplay(
         n_players=n_players,
-        batches=500,
-        episodes_per_batch=16,
+        batches=250,
+        episodes_per_batch=64,  # Increased from 16 for more stable gradients
         lr=0.0003,
         entropy_beta=0.02,
         value_coef=0.5,
@@ -663,7 +690,7 @@ if __name__ == "__main__":
         seed=42,
         device=device,
         eval_interval=25,
-        eval_games=500,
+        eval_games=250,
     )
 
     hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
