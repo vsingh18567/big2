@@ -1,5 +1,7 @@
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -45,13 +47,28 @@ def select_action(
     return chosen, logprob, entropy, value, max_prob
 
 
-def episode(env: Big2Env, policy: MLPPolicy, greedy_players: set[int] | None = None):
+def episode(
+    env: Big2Env,
+    policy: MLPPolicy,
+    opponent_strategies: dict[int, MLPPolicy | Callable[[list[Combo]], Combo]] | None = None,
+    model_players: set[int] | None = None,
+):
     """
-    Run one episode. Players in greedy_players use greedy strategy, others use the model.
-    Only model players' trajectories are recorded for training.
+    Run one episode with opponent sampling support.
+
+    Args:
+        env: Big2Env instance
+        policy: Current policy for model players
+        opponent_strategies: Dict mapping player_id -> strategy (MLPPolicy, greedy_strategy, or random_strategy)
+        model_players: Set of player IDs that use the current policy (for trajectory recording)
+
+    Returns:
+        Trajectory dict for model players only
     """
-    if greedy_players is None:
-        greedy_players = set()
+    if opponent_strategies is None:
+        opponent_strategies = {}
+    if model_players is None:
+        model_players = set(range(env.n_players))
 
     # Records per player (only for model players)
     traj: dict[int, list[StepRecord]] = {p: [] for p in range(env.n_players)}
@@ -63,9 +80,18 @@ def episode(env: Big2Env, policy: MLPPolicy, greedy_players: set[int] | None = N
         if not candidates:
             candidates = [Combo(PASS, [], ())]
 
-        if p in greedy_players:
-            # Greedy player: no gradient tracking needed
-            action = greedy_strategy(candidates)
+        if p in opponent_strategies:
+            # Opponent player: use provided strategy
+            strategy = opponent_strategies[p]
+            if isinstance(strategy, MLPPolicy):
+                # Policy-based opponent (current policy or past checkpoint)
+                action = select_action_greedy(strategy, state, candidates)
+            elif strategy == greedy_strategy or strategy == random_strategy:
+                # Simple function strategy
+                action = strategy(candidates)
+            else:
+                # Fallback to greedy
+                action = greedy_strategy(candidates)
             next_state, done = env.step(action)
         else:
             # Model player: sample action and record trajectory
@@ -94,10 +120,8 @@ def episode(env: Big2Env, policy: MLPPolicy, greedy_players: set[int] | None = N
         # Assign terminal rewards at the end
         if done:
             winner = env.winner
-            for q in range(env.n_players):
+            for q in model_players:
                 # Only update rewards for model players
-                if q in greedy_players:
-                    continue
                 # If winner: reward is the number of cards in the other players' hands
                 # If loser: reward is the negative number of cards in our hand
                 final_r = sum(len(env.hands[i]) for i in range(env.n_players) if i != q) if q == winner else 0.0
@@ -137,13 +161,37 @@ def select_action_greedy(policy: MLPPolicy, state: np.ndarray, candidates: list[
         return candidates[idx]
 
 
-def play_evaluation_game(current_policy: MLPPolicy, n_players: int, device="cpu") -> int | None:
+def random_strategy(candidates: list[Combo]) -> Combo:
+    """Select a random legal action."""
+    return random.choice(candidates)
+
+
+@dataclass
+class EvaluationMetrics:
+    """Container for evaluation metrics."""
+
+    win_rate_vs_greedy: float
+    win_rate_vs_random: float
+    avg_cards_remaining_when_losing: float
+    win_rate_by_starting_position: dict[int, float]
+    total_games: int
+
+
+def play_evaluation_game(
+    current_policy: MLPPolicy,
+    n_players: int,
+    opponent_strategy: Callable[[list[Combo]], Combo] = greedy_strategy,
+    device="cpu",
+) -> tuple[int | None, int, int]:
     """
-    Play one game where player 0 uses current_policy and players 1-(n_players-1) use greedy strategy.
-    Returns the winner (0 if current policy wins, 1-(n_players-1) if greedy wins).
+    Play one evaluation game where player 0 uses current_policy and others use opponent_strategy.
+
+    Returns:
+        (winner, starting_position, cards_remaining_for_player_0)
     """
     env = Big2Env(n_players)
     state = env.reset()
+    starting_position = env.current_player
 
     while not env.done:
         p = env.current_player
@@ -151,30 +199,106 @@ def play_evaluation_game(current_policy: MLPPolicy, n_players: int, device="cpu"
         if not candidates:
             candidates = [Combo(PASS, [], ())]
 
-        # Player 0 uses current policy, others use greedy strategy
+        # Player 0 uses current policy, others use opponent strategy
         if p == 0:
             action = select_action_greedy(current_policy, state, candidates)
         else:
-            action = greedy_strategy(candidates)
+            action = opponent_strategy(candidates)
 
         state, _ = env.step(action)
 
-    return env.winner
+    cards_remaining = len(env.hands[0]) if env.winner != 0 else 0
+    return env.winner, starting_position, cards_remaining
 
 
-def evaluate_against_greedy(current_policy: MLPPolicy, n_players: int, num_games: int = 100, device="cpu") -> float:
+def evaluate_against_greedy(
+    current_policy: MLPPolicy, n_players: int, num_games: int = 500, device="cpu"
+) -> EvaluationMetrics:
     """
-    Evaluate current policy against greedy strategy by playing num_games.
-    Returns win rate of current policy (player 0).
+    Comprehensive evaluation of current policy.
+
+    Returns:
+        EvaluationMetrics with various performance metrics
     """
-    wins = 0
+    wins_vs_greedy = 0
+    wins_vs_random = 0
+    cards_remaining_sum = 0
+    losses_count = 0
+    wins_by_position: dict[int, int] = {}
+    games_by_position: dict[int, int] = {}
+
+    # Evaluate against greedy
     for _ in range(num_games):
-        winner = play_evaluation_game(current_policy, n_players, device)
+        winner, starting_pos, cards_remaining = play_evaluation_game(
+            current_policy, n_players, opponent_strategy=greedy_strategy, device=device
+        )
         if winner == 0:
-            wins += 1
+            wins_vs_greedy += 1
+            wins_by_position[starting_pos] = wins_by_position.get(starting_pos, 0) + 1
+        else:
+            cards_remaining_sum += cards_remaining
+            losses_count += 1
+        games_by_position[starting_pos] = games_by_position.get(starting_pos, 0) + 1
 
-    win_rate = wins / num_games
-    return win_rate
+    # Evaluate against random
+    for _ in range(num_games):
+        winner, _, _ = play_evaluation_game(current_policy, n_players, opponent_strategy=random_strategy, device=device)
+        if winner == 0:
+            wins_vs_random += 1
+
+    win_rate_vs_greedy = wins_vs_greedy / num_games
+    win_rate_vs_random = wins_vs_random / num_games
+    avg_cards_remaining = cards_remaining_sum / losses_count if losses_count > 0 else 0.0
+    win_rate_by_position = {pos: wins_by_position.get(pos, 0) / games_by_position[pos] for pos in games_by_position}
+
+    return EvaluationMetrics(
+        win_rate_vs_greedy=win_rate_vs_greedy,
+        win_rate_vs_random=win_rate_vs_random,
+        avg_cards_remaining_when_losing=avg_cards_remaining,
+        win_rate_by_starting_position=win_rate_by_position,
+        total_games=num_games,
+    )
+
+
+class CheckpointManager:
+    """Manages past checkpoints for opponent sampling."""
+
+    def __init__(self, checkpoint_dir: str = "big2", device: str = "cpu", n_players: int = 4):
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.device = device
+        self.n_players = n_players
+        self.checkpoints: list[tuple[int, MLPPolicy]] = []  # (step, policy)
+        self.max_checkpoints = 20  # Keep last 20 checkpoints
+
+    def add_checkpoint(self, step: int, policy: MLPPolicy):
+        """Add a checkpoint to the pool."""
+        # Create a copy of the policy
+        checkpoint_policy = MLPPolicy(n_players=self.n_players, device=self.device).to(self.device)
+        checkpoint_policy.load_state_dict(policy.state_dict())
+        checkpoint_policy.eval()
+
+        self.checkpoints.append((step, checkpoint_policy))
+
+        # Keep only the most recent checkpoints
+        if len(self.checkpoints) > self.max_checkpoints:
+            self.checkpoints.pop(0)
+
+    def sample_opponent_policy(self, current_policy: MLPPolicy, current_step: int) -> MLPPolicy | Callable:
+        """
+        Sample an opponent policy/strategy. Returns either a policy or a callable strategy function.
+        This version is used in episode() where we need the actual state.
+        """
+        r = random.random()
+        if r < 0.5:
+            # Current policy (self-play)
+            return current_policy
+        elif r < 0.75 and len(self.checkpoints) > 0:
+            # Past checkpoints (last 10)
+            _, checkpoint_policy = random.choice(self.checkpoints[-10:])
+            return checkpoint_policy
+        else:
+            # Greedy baseline
+            return greedy_strategy
 
 
 def compute_gae_from_values(
@@ -204,38 +328,33 @@ def train_selfplay(
     n_players=4,
     batches=2000,
     episodes_per_batch=10,
-    lr=3e-4,
+    lr=1e-3,
     entropy_beta=0.01,
     value_coef=0.5,
     gamma=1.0,
     seed=42,
     device="cpu",
     eval_interval=50,
-    eval_games=100,
+    eval_games=500,
 ):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # Adaptive greedy opponent schedule based on win rate
-    # Start with all greedy opponents, reduce as model improves
-    # Schedule: n_players - 1 -> n_players // 2 (at 25% win rate) -> 0 (at 30% win rate)
-    greedy_schedule = [n_players - 1, n_players // 2, 0]
-    greedy_thresholds = [0.0, 0.25, 0.30]  # Win rate thresholds to advance
-    current_schedule_idx = 0
-    n_greedy_opponents = greedy_schedule[current_schedule_idx]
+    # Opponent sampling: 50% current policy, 30% past checkpoints, 20% greedy
+    # Model players are always player 0, opponents are players 1 to n_players-1
+    model_players = {0}
+    opponent_players = set(range(1, n_players))
 
-    # Define which players use greedy strategy (last n_greedy_opponents players)
-    # Model players are 0 to (n_players - n_greedy_opponents - 1)
-    greedy_players = set(range(n_players - n_greedy_opponents, n_players))
-    model_players = set(range(n_players)) - greedy_players
-    print(f"Greedy opponent schedule: {greedy_schedule} at win rate thresholds {greedy_thresholds}")
-    print(f"Starting with {len(model_players)} model players and {len(greedy_players)} greedy opponents")
-    print(f"Model players: {sorted(model_players)}, Greedy players: {sorted(greedy_players)}")
+    print(f"Model players: {sorted(model_players)}, Opponent players: {sorted(opponent_players)}")
+    print("Opponent mixture: 50% current policy, 30% past checkpoints, 20% greedy baseline")
 
     env = Big2Env(n_players)
     policy = MLPPolicy(n_players=n_players, device=device).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=lr)
+
+    # Checkpoint manager for opponent sampling
+    checkpoint_manager = CheckpointManager(device=device, n_players=n_players)
 
     # Learning rate annealing
     initial_lr = lr
@@ -255,7 +374,12 @@ def train_selfplay(
     for batch in tqdm(range(1, batches + 1)):
         batch_logp, batch_val, batch_ret, batch_adv, batch_ent, batch_max_logp = [], [], [], [], [], []
         for _ in range(1, episodes_per_batch + 1):
-            traj = episode(env, policy, greedy_players=greedy_players)
+            # Sample opponents for this episode
+            opponent_strategies = dict.fromkeys(opponent_players)
+            for opp_id in opponent_players:
+                opponent_strategies[opp_id] = checkpoint_manager.sample_opponent_policy(policy, batch)
+            traj = episode(env, policy, opponent_strategies=opponent_strategies, model_players=model_players)
+
             for p in model_players:
                 if len(traj[p]) == 0:
                     continue
@@ -313,39 +437,40 @@ def train_selfplay(
 
         # Evaluation every eval_interval episodes
         if batch % eval_interval == 0:
-            avg_len = sum(len(traj[p]) for p in model_players) / len(model_players)
+            avg_len = sum(len(traj[p]) for p in model_players) / len(model_players) if model_players else 0
 
-            # Evaluate against greedy policy
-            print(f"\n[Step {batch}] Evaluating against greedy policy...")
+            # Comprehensive evaluation
+            print(f"\n[Step {batch}] Evaluating policy...")
             policy.eval()
-            win_rate = evaluate_against_greedy(policy, n_players, num_games=eval_games, device=device)
+            metrics = evaluate_against_greedy(policy, n_players, num_games=eval_games, device=device)
             policy.train()
 
             eval_episodes.append(batch)
-            win_rates.append(win_rate)
+            win_rates.append(metrics.win_rate_vs_greedy)
 
-            print(f"[Step {batch}] Win rate vs greedy: {win_rate:.2%} ({int(win_rate * eval_games)}/{eval_games} wins)")
+            print(f"[Step {batch}] Evaluation Results ({metrics.total_games} games):")
+            wins_vs_greedy = int(metrics.win_rate_vs_greedy * metrics.total_games)
+            wr_str = f"  Win rate vs greedy: {metrics.win_rate_vs_greedy:.2%}"
+            wr_str += f" ({wins_vs_greedy}/{metrics.total_games} wins)"
+            print(wr_str)
+            print(f"  Win rate vs random: {metrics.win_rate_vs_random:.2%}")
+            print(f"  Avg cards remaining when losing: {metrics.avg_cards_remaining_when_losing:.2f}")
+            print("  Win rate by starting position:")
+            for pos, wr in sorted(metrics.win_rate_by_starting_position.items()):
+                print(f"    Position {pos}: {wr:.2%}")
             print(
                 f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} "
                 f"val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}"
             )
-            print(f"[Step {batch}] Current greedy opponents: {n_greedy_opponents}\n")
+            n_checkpoints = len(checkpoint_manager.checkpoints)
+            print(f"[Step {batch}] Checkpoints in pool: {n_checkpoints}\n")
 
-            # Check if we should advance to the next stage of greedy opponent reduction
-            if current_schedule_idx < len(greedy_schedule) - 1:
-                next_threshold = greedy_thresholds[current_schedule_idx + 1]
-                if win_rate >= next_threshold:
-                    current_schedule_idx += 1
-                    n_greedy_opponents = greedy_schedule[current_schedule_idx]
-                    greedy_players = set(range(n_players - n_greedy_opponents, n_players))
-                    model_players = set(range(n_players)) - greedy_players
-                    print(f"*** Win rate {win_rate:.2%} >= {next_threshold:.0%} threshold ***")
-                    print(f"*** Advancing to {n_greedy_opponents} greedy opponents ***")
-                    print(f"*** Model players: {sorted(model_players)}, Greedy players: {sorted(greedy_players)} ***\n")
-
+            # Save checkpoint and add to manager
             save_path = f"big2_model_step_{batch}.pt"
             torch.save(policy.state_dict(), save_path)
             print(f"Checkpoint saved to {save_path}")
+
+            checkpoint_manager.add_checkpoint(batch, policy)
 
     return (
         policy,
@@ -510,7 +635,11 @@ def value_of_starting_hand(
 
 
 if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+    print(f"Using device: {device}")
     n_players = 4  # Greedy opponents adapt based on win rate: 3 -> 2 -> 0
     cards_per_player = 52 // n_players
 
@@ -534,7 +663,7 @@ if __name__ == "__main__":
         seed=42,
         device=device,
         eval_interval=25,
-        eval_games=100,
+        eval_games=500,
     )
 
     hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
