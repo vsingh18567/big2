@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Big 2 - Play Against AI</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>🎴 Big 2</h1>
+            <p class="subtitle">Play against AI</p>
+        </header>
+
+        <div id="game-setup" class="game-setup">
+            <div class="setup-form">
+                <h2>Start New Game</h2>
+                <div class="form-group">
+                    <label for="model-path">Model Path:</label>
+                    <input type="text" id="model-path" value="big2_model.pt" placeholder="big2_model.pt">
+                </div>
+                <div class="form-group">
+                    <label for="n-players">Number of Players:</label>
+                    <select id="n-players">
+                        <option value="2">2 Players</option>
+                        <option value="3">3 Players</option>
+                        <option value="4" selected>4 Players</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="device">Device:</label>
+                    <select id="device">
+                        <option value="auto">Auto (CUDA if available)</option>
+                        <option value="cpu">CPU</option>
+                        <option value="cuda">CUDA</option>
+                    </select>
+                </div>
+                <button id="start-btn" class="btn btn-primary">Start Game</button>
+            </div>
+        </div>
+
+        <div id="game-area" class="game-area hidden">
+            <div class="game-header">
+                <div class="game-info">
+                    <span id="turn-indicator"></span>
+                    <span id="game-status"></span>
+                </div>
+                <button id="new-game-btn" class="btn btn-secondary">New Game</button>
+            </div>
+
+            <div class="opponents-area">
+                <div id="opponents" class="opponents"></div>
+            </div>
+
+            <div class="trick-area">
+                <h3>Current Trick</h3>
+                <div id="trick-display" class="trick-display">
+                    <p class="empty-trick">No trick in play - you can play anything</p>
+                </div>
+            </div>
+
+            <div class="bot-suggestion-area">
+                <h3>🤖 Bot Suggestion</h3>
+                <div id="bot-suggestion" class="bot-suggestion">
+                    <p class="no-suggestion">Waiting for your turn...</p>
+                </div>
+            </div>
+
+            <div class="legal-moves-area">
+                <h3>Legal Moves</h3>
+                <div id="legal-moves" class="legal-moves"></div>
+            </div>
+
+            <div class="hand-area">
+                <h3>Your Hand (<span id="hand-count">0</span> cards)</h3>
+                <div id="hand" class="hand"></div>
+                <div class="hand-actions">
+                    <button id="pass-btn" class="btn btn-secondary" disabled>Pass</button>
+                    <button id="play-btn" class="btn btn-primary" disabled>Play Selected</button>
+                    <button id="clear-selection-btn" class="btn btn-secondary" disabled>Clear Selection</button>
+                </div>
+            </div>
+
+            <div id="ai-actions-log" class="ai-actions-log"></div>
+        </div>
+
+        <div id="game-over" class="game-over hidden">
+            <h2 id="game-over-title"></h2>
+            <p id="game-over-message"></p>
+            <button id="play-again-btn" class="btn btn-primary">Play Again</button>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
