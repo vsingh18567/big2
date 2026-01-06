@@ -661,11 +661,7 @@ def train_ppo(
             print(f"[Step {batch}] lr={current_lr:.6f} ent_beta={current_entropy_beta:.4f}")
             n_checkpoints = len(checkpoint_manager.checkpoints)
             stage = checkpoint_manager.greedy_schedule_stage
-            greedy_pct = {0: "20%", 1: "10%", 2: "5%"}[stage]
-            print(
-                f"[Step {batch}] Checkpoints in pool: {n_checkpoints}, "
-                f"Greedy schedule stage: {stage} ({greedy_pct} greedy)\n"
-            )
+            print(f"[Step {batch}] Checkpoints in pool: {n_checkpoints}, Greedy schedule stage: {stage}\n")
 
             # Save checkpoint and add to manager
             save_path = f"big2_model_step_{batch}.pt"
