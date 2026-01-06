@@ -3,9 +3,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from big2.simulator.cards import PASS, Combo
+from big2.simulator.cards import PASS, Combo, card_suit
 
 DROPOUT_RATE = 0.1
+
+# Action vector dimensions:
+# 52 (card flags) + 1 (pass flag) + 9 (combo type) + 1 (num_cards) + 13 (key rank) + 4 (key suit) = 80
+ACTION_VECTOR_DIM = 80
 
 
 def input_dim(n_players: int = 4) -> int:
@@ -20,13 +24,69 @@ def input_dim(n_players: int = 4) -> int:
 
 
 def combo_to_action_vector(cmb: Combo) -> np.ndarray:
-    # 52 one-hot for cards used
-    vec = np.zeros(52 + 1, dtype=np.float32)
-    if cmb.type == PASS:
-        vec[52] = 1.0
+    """
+    Convert a Combo to a feature vector for the action encoder.
 
+    Features:
+    - 52 dims: one-hot for cards used
+    - 1 dim: pass flag
+    - 9 dims: combo type one-hot (PASS, SINGLE, PAIR, TRIPLE, STRAIGHT, FLUSH, FULLHOUSE, FOUR_KIND, STRAIGHT_FLUSH)
+    - 1 dim: number of cards (normalized by 5)
+    - 13 dims: key rank one-hot (the primary rank determining combo strength)
+    - 4 dims: key suit one-hot (for tiebreakers)
+    """
+    vec = np.zeros(ACTION_VECTOR_DIM, dtype=np.float32)
+
+    # Card flags (0-51)
     for c in cmb.cards:
         vec[c] = 1.0
+
+    # Pass flag (52)
+    if cmb.type == PASS:
+        vec[52] = 1.0
+        # Combo type one-hot for PASS (53)
+        vec[53] = 1.0
+        return vec
+
+    # Combo type one-hot (53-61): 9 types
+    vec[53 + cmb.type] = 1.0
+
+    # Number of cards normalized (62)
+    vec[62] = len(cmb.cards) / 5.0
+
+    # Key rank one-hot (63-75): 13 ranks
+    # Extract the primary rank from the key tuple
+    if cmb.key:
+        # For most combos, the first element of key contains the primary rank
+        # SINGLE: (rank, suit), PAIR: (rank, max_suit), TRIPLE: (rank,)
+        # STRAIGHT: (high_rank, high_suit), FLUSH: (suit, ranks...)
+        # FULLHOUSE: (trip_rank, pair_rank), FOUR_KIND: (quad_rank,)
+        # STRAIGHT_FLUSH: (high_suit, high_rank)
+        if cmb.type in (1, 2, 3, 7):  # SINGLE, PAIR, TRIPLE, FOUR_KIND - rank is first
+            key_rank = cmb.key[0]
+            vec[63 + key_rank] = 1.0
+        elif cmb.type == 4:  # STRAIGHT - high_rank is first
+            key_rank = cmb.key[0]
+            vec[63 + key_rank] = 1.0
+        elif cmb.type == 5:  # FLUSH - suit is first, ranks follow
+            if len(cmb.key) > 1:
+                key_rank = cmb.key[1]  # highest rank is second element
+                vec[63 + key_rank] = 1.0
+        elif cmb.type == 6:  # FULLHOUSE - trip_rank is first
+            key_rank = cmb.key[0]
+            vec[63 + key_rank] = 1.0
+        elif cmb.type == 8:  # STRAIGHT_FLUSH - suit is first, high_rank is second
+            if len(cmb.key) > 1:
+                key_rank = cmb.key[1]
+                vec[63 + key_rank] = 1.0
+
+    # Key suit one-hot (76-79): 4 suits
+    # Extract suit from the highest card in the combo for consistency
+    if cmb.cards:
+        # Use the suit of the highest card in the combo
+        max_card = max(cmb.cards)
+        key_suit = card_suit(max_card)
+        vec[76 + key_suit] = 1.0
 
     return vec
 
@@ -55,9 +115,9 @@ class MLPPolicy(nn.Module):
         self.state_proj = nn.Linear(hidden + hidden + hidden + hidden // 2 + hidden // 4 + hidden, hidden)
         self.state_ln = nn.LayerNorm(hidden)
 
-        # Action encoder: 52 one-hot + type one-hot(9) + size scalar(1) + key features (up to 3 ints) → MLP
+        # Action encoder: 52 cards + 1 pass + 9 combo types + 1 num_cards + 13 ranks + 4 suits = 80
         self.action_enc = nn.Sequential(
-            nn.Linear(52 + 1, action_hidden),
+            nn.Linear(ACTION_VECTOR_DIM, action_hidden),
             nn.ReLU(),
             nn.Dropout(DROPOUT_RATE),
             nn.Linear(action_hidden, action_hidden),
@@ -119,7 +179,7 @@ class MLPPolicy(nn.Module):
         # Encode actions per example
         # Build offsets to split later
         counts = [len(a) if len(a) > 0 else 1 for a in actions_batch]
-        feats = self.encode_actions(actions_batch)  # (sumA, 53)
+        feats = self.encode_actions(actions_batch)  # (sumA, ACTION_VECTOR_DIM)
         aenc = self.action_enc(feats)  # (sumA, action_hidden)
         # Tile state_h accordingly
         tiled = torch.cat(

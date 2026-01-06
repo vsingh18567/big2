@@ -299,13 +299,13 @@ class CheckpointManager:
 
     # Define opponent mix for each training stage
     STAGE_0 = OpponentMix(
-        greedy_weight=0.20, smart_weight=0.35, current_weight=0.30, checkpoint_weight=0.15, random_weight=0
+        greedy_weight=0.40, smart_weight=0.0, current_weight=0.30, checkpoint_weight=0.0, random_weight=0.30
     )
     STAGE_1 = OpponentMix(
-        greedy_weight=0.10, smart_weight=0.25, current_weight=0.45, checkpoint_weight=0.20, random_weight=0
+        greedy_weight=0.30, smart_weight=0.10, current_weight=0.35, checkpoint_weight=0.05, random_weight=0.10
     )
     STAGE_2 = OpponentMix(
-        greedy_weight=0.05, smart_weight=0.2, current_weight=0.60, checkpoint_weight=0.15, random_weight=0
+        greedy_weight=0.20, smart_weight=0.20, current_weight=0.45, checkpoint_weight=0.10, random_weight=0.05
     )
 
     def __init__(self, checkpoint_dir: str = "big2", device: str = "cpu", n_players: int = 4):
@@ -334,13 +334,13 @@ class CheckpointManager:
         Update the greedy schedule stage based on win rate against greedy.
         Schedule only advances forward (never regresses).
 
-        Stage 0: win_rate < 0.25 → greedy 50%
-        Stage 1: 0.25 ≤ win_rate < 0.35 → greedy 25%
-        Stage 2: win_rate ≥ 0.35 → greedy 15%
+        Stage 0: win_rate < 0.20 → heavy random/greedy mix (easy)
+        Stage 1: 0.20 ≤ win_rate < 0.30 → add a bit of smart/self-play
+        Stage 2: win_rate ≥ 0.30 → more self-play and smart, less random
         """
-        if win_rate >= 0.35 and self.greedy_schedule_stage < 2:
+        if win_rate >= 0.30 and self.greedy_schedule_stage < 2:
             self.greedy_schedule_stage = 2
-        elif win_rate >= 0.25 and self.greedy_schedule_stage < 1:
+        elif win_rate >= 0.20 and self.greedy_schedule_stage < 1:
             self.greedy_schedule_stage = 1
 
     def sample_opponent_policy(self, current_policy: MLPPolicy) -> MLPPolicy | Callable:

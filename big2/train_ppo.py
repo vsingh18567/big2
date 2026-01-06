@@ -89,7 +89,7 @@ def collect_ppo_trajectories(
 
                     action = candidates[int(idx.item())]
                     next_state, done = env.step(action)
-                    reward = 0.0
+                    reward = -0.001  # Small step penalty to encourage finishing quickly
                     episode_trajs[p].append(
                         PPOStepRecord(
                             state=state.copy(),
@@ -110,12 +110,12 @@ def collect_ppo_trajectories(
                 winner = env.winner
                 for q in model_players:
                     if len(episode_trajs[q]) > 0:
-                        final_r = (
-                            sum(len(env.hands[i]) for i in range(env.n_players) if i != q)
-                            if q == winner
-                            else -len(env.hands[q])
-                        )
-                        episode_trajs[q][-1].reward = final_r
+                        if q == winner:
+                            final_r = 1.0
+                        else:
+                            final_r = -len(env.hands[q]) / (52 // env.n_players)
+                        # Add terminal reward on top of intermediate step penalty
+                        episode_trajs[q][-1].reward += final_r
                         # Append to full trajectories
                         trajectories[q].extend(episode_trajs[q])
                 break
@@ -212,7 +212,7 @@ def collect_ppo_trajectories_batched(
                         action_idx=action_idx,
                         candidates=batch_candidates[i],
                         old_logprob=old_logprob.detach(),
-                        reward=0.0,
+                        reward=-0.001,  # Small step penalty to encourage finishing quickly
                         value=value.detach(),
                     )
                 )
@@ -248,12 +248,12 @@ def collect_ppo_trajectories_batched(
                 winner = env.winner
                 for q in model_players:
                     if len(episode_trajs[env_idx][q]) > 0:
-                        final_r = (
-                            sum(len(env.hands[i]) for i in range(env.n_players) if i != q)
-                            if q == winner
-                            else -len(env.hands[q])
-                        )
-                        episode_trajs[env_idx][q][-1].reward = final_r
+                        if q == winner:
+                            final_r = 1.0
+                        else:
+                            final_r = -len(env.hands[q]) / (52 // env.n_players)
+                        # Add terminal reward on top of intermediate step penalty
+                        episode_trajs[env_idx][q][-1].reward += final_r
                         # Append to full trajectories
                         trajectories[q].extend(episode_trajs[env_idx][q])
             else:
@@ -337,6 +337,7 @@ def ppo_update(
             batch_action_indices = [all_action_indices[i] for i in batch_indices.cpu().numpy()]
             batch_candidates = [all_candidates[i] for i in batch_indices.cpu().numpy()]
             batch_old_logprobs = old_logprobs_t[batch_indices]
+            batch_old_values = old_values_t[batch_indices]
             batch_advantages = advantages[batch_indices]
             batch_returns = returns[batch_indices]
 
@@ -369,13 +370,20 @@ def ppo_update(
             surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * batch_advantages
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            # Value function loss (optionally clipped)
+            # Value function loss with clipping
             # Ensure both tensors are 1D (handle edge case where batch_size=1)
             if new_values.dim() == 0:
                 new_values = new_values.unsqueeze(0)
             if batch_returns.dim() == 0:
                 batch_returns = batch_returns.unsqueeze(0)
-            value_loss = F.mse_loss(new_values, batch_returns)
+            if batch_old_values.dim() == 0:
+                batch_old_values = batch_old_values.unsqueeze(0)
+            value_pred_clipped = batch_old_values + torch.clamp(
+                new_values - batch_old_values, -clip_epsilon, clip_epsilon
+            )
+            value_losses_clipped = F.mse_loss(value_pred_clipped, batch_returns, reduction="none")
+            value_losses_unclipped = F.mse_loss(new_values, batch_returns, reduction="none")
+            value_loss = torch.max(value_losses_clipped, value_losses_unclipped).mean()
 
             # Entropy bonus
             entropy = entropies.mean()
@@ -455,7 +463,7 @@ def train_ppo(
     print(f"PPO parameters: epochs={ppo_epochs}, clip_epsilon={clip_epsilon}")
     print(
         "Opponent mixture: Adaptive based on win rate schedule "
-        "(<20%: 50% greedy, 20-30%: 25% greedy, >=30%: 15% greedy)"
+        "(Stage 0: 20% greedy/35% smart, Stage 1: 10% greedy/25% smart, Stage 2: 5% greedy/20% smart)"
     )
 
     env = Big2Env(n_players)
@@ -469,7 +477,7 @@ def train_ppo(
     warmup_batches = batches // 10  # 10% warmup
 
     def lr_lambda(current_batch):
-        min_lr_ratio = 0.2  # LR won't drop below 20% of initial
+        min_lr_ratio = 0.5  # LR won't drop below 50% of initial
         if current_batch < warmup_batches:
             # Linear warmup
             return current_batch / warmup_batches
@@ -483,8 +491,8 @@ def train_ppo(
 
     # Adaptive entropy coefficient
     current_entropy_beta = entropy_beta
-    target_entropy = 0.5  # Target entropy level
-    entropy_beta_min = 0.02
+    target_entropy = 0.7  # Target entropy level
+    entropy_beta_min = 0.05
     entropy_beta_max = 0.2
 
     # Track losses for plotting
@@ -531,12 +539,12 @@ def train_ppo(
         scheduler.step()
 
         # Adaptive entropy coefficient: adjust based on current entropy
-        if entropy < target_entropy - 0.1:
+        if entropy < target_entropy - 0.15:
             # Entropy too low, encourage more exploration
-            current_entropy_beta = min(entropy_beta_max, current_entropy_beta * 1.02)
-        elif entropy > target_entropy + 0.1:
+            current_entropy_beta = min(entropy_beta_max, current_entropy_beta * 1.01)
+        elif entropy > target_entropy + 0.15:
             # Entropy too high, allow more exploitation
-            current_entropy_beta = max(entropy_beta_min, current_entropy_beta * 0.98)
+            current_entropy_beta = max(entropy_beta_min, current_entropy_beta * 0.99)
 
         # Record losses
         loss_history.append(total_loss)
@@ -547,6 +555,7 @@ def train_ppo(
         # Evaluation every eval_interval batches
         if batch % eval_interval == 0:
             avg_len = sum(len(trajectories[p]) for p in model_players) / len(model_players) if model_players else 0
+            avg_steps_per_episode = avg_len / episodes_per_batch if episodes_per_batch > 0 else 0
 
             # Comprehensive evaluation
             print(f"\n[Step {batch}] Evaluating policy...")
@@ -577,12 +586,13 @@ def train_ppo(
             current_lr = scheduler.get_last_lr()[0]
             print(
                 f"[Step {batch}] loss={total_loss:.3f} pol={policy_loss:.3f} "
-                f"val={value_loss:.3f} ent={entropy:.3f} steps/player~{avg_len:.1f}"
+                f"val={value_loss:.3f} ent={entropy:.3f} steps/player={avg_len:.1f} "
+                f"({episodes_per_batch} episodes, ~{avg_steps_per_episode:.1f} steps/episode)"
             )
             print(f"[Step {batch}] lr={current_lr:.6f} ent_beta={current_entropy_beta:.4f}")
             n_checkpoints = len(checkpoint_manager.checkpoints)
             stage = checkpoint_manager.greedy_schedule_stage
-            greedy_pct = {0: "50%", 1: "25%", 2: "15%"}[stage]
+            greedy_pct = {0: "20%", 1: "10%", 2: "5%"}[stage]
             print(
                 f"[Step {batch}] Checkpoints in pool: {n_checkpoints}, "
                 f"Greedy schedule stage: {stage} ({greedy_pct} greedy)\n"
@@ -627,7 +637,7 @@ if __name__ == "__main__":
         n_players=n_players,
         batches=200,
         episodes_per_batch=64,
-        ppo_epochs=4,
+        ppo_epochs=3,
         clip_epsilon=0.2,
         lr=3e-4,
         entropy_beta=0.05,

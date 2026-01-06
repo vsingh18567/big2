@@ -186,7 +186,8 @@ def train_selfplay(
             current_lr = scheduler.get_last_lr()[0]
             print(
                 f"[Step {batch}] loss={loss.item():.3f} pol={policy_loss.item():.3f} "
-                f"val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player~{avg_len:.1f}"
+                f"val={value_loss.item():.3f} ent={entropy.item():.3f} steps/player={avg_len:.1f} "
+                f"({episodes_per_batch} episodes/batch, last episode)"
             )
             print(f"[Step {batch}] lr={current_lr:.6f} ent_beta={current_entropy_beta:.4f}")
             n_checkpoints = len(checkpoint_manager.checkpoints)
