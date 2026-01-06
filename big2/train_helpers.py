@@ -363,7 +363,10 @@ class CheckpointManager:
         greedy_weight=0.30, smart_weight=0.15, current_weight=0.35, checkpoint_weight=0.05, random_weight=0.15
     )
     STAGE_2 = OpponentMix(
-        greedy_weight=0.15, smart_weight=0.25, current_weight=0.40, checkpoint_weight=0.10, random_weight=0.10
+        greedy_weight=0.15, smart_weight=0.30, current_weight=0.35, checkpoint_weight=0.10, random_weight=0.10
+    )
+    STAGE_3 = OpponentMix(
+        greedy_weight=0.10, smart_weight=0.30, current_weight=0.40, checkpoint_weight=0.15, random_weight=0.05
     )
 
     def __init__(self, checkpoint_dir: str = "big2", device: str = "cpu", n_players: int = 4):
@@ -396,9 +399,11 @@ class CheckpointManager:
         Stage 1: 0.20 ≤ win_rate < 0.30 → add a bit of smart/self-play
         Stage 2: win_rate ≥ 0.30 → more self-play and smart, less random
         """
+        if win_rate >= 0.40 and self.greedy_schedule_stage < 3:
+            self.greedy_schedule_stage = 3
         if win_rate >= 0.35 and self.greedy_schedule_stage < 2:
             self.greedy_schedule_stage = 2
-        elif win_rate >= 0.25 and self.greedy_schedule_stage < 1:
+        elif win_rate >= 0.2 and self.greedy_schedule_stage < 1:
             self.greedy_schedule_stage = 1
 
     def sample_opponent_policy(self, current_policy: MLPPolicy) -> MLPPolicy | Callable:
@@ -410,9 +415,10 @@ class CheckpointManager:
         - Stage 0 (<20% win rate): More greedy/smart to learn basics
         - Stage 1 (20-30% win rate): Balanced mix with more self-play
         - Stage 2 (≥30% win rate): Heavy self-play with occasional baselines
+        - Stage 3 (≥40% win rate): More self-play and smart, less random
         """
         # Select the appropriate opponent mix based on stage
-        opponent_mix = [self.STAGE_0, self.STAGE_1, self.STAGE_2][self.greedy_schedule_stage]
+        opponent_mix = [self.STAGE_0, self.STAGE_1, self.STAGE_2, self.STAGE_3][self.greedy_schedule_stage]
         weights, strategies = opponent_mix.get_weights_and_strategies()
 
         # Sample strategy type using weighted random choice
@@ -427,7 +433,7 @@ class CheckpointManager:
         elif chosen_strategy == "checkpoint":
             if len(self.checkpoints) > 0:
                 # Sample from last 5 checkpoints
-                _, checkpoint_policy = random.choice(self.checkpoints[-5:])
+                _, checkpoint_policy = random.choice(self.checkpoints[-10:])
                 return checkpoint_policy
             else:
                 # Fallback to random if no checkpoints available

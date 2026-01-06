@@ -547,7 +547,8 @@ def train_ppo(
 
     # Adaptive entropy coefficient
     current_entropy_beta = entropy_beta
-    target_entropy = 0.7  # Target entropy level
+    target_entropy_start = 0.8  # Target entropy level
+    target_entropy_end = 0.5
     entropy_beta_min = 0.05
     entropy_beta_max = 0.2
 
@@ -567,7 +568,8 @@ def train_ppo(
         base_seats = np.arange(episodes_per_batch) % n_players
         perm = np.random.permutation(episodes_per_batch)
         model_seats = [int(base_seats[i]) for i in perm]
-
+        frac = batch / batches
+        target_entropy = target_entropy_start + (target_entropy_end - target_entropy_start) * frac
         opponent_strategies_by_env: list[dict[int, MLPPolicy | Callable]] = []
         for env_idx in range(episodes_per_batch):
             model_seat = model_seats[env_idx]
@@ -714,7 +716,7 @@ if __name__ == "__main__":
         seed=42,
         device=device,
         eval_interval=25,
-        eval_games=250,
+        eval_games=400,
         mini_batch_size=256,
     )
 
