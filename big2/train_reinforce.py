@@ -106,9 +106,12 @@ def train_selfplay(
                 logprobs_t = torch.stack([rec.logprob for rec in traj[p]])  # [T]
                 entropies_t = torch.stack([rec.entropy for rec in traj[p]])  # [T]
                 max_logprobs_t = torch.stack([rec.max_logprob for rec in traj[p]])  # [T]
+                dones_t = torch.zeros_like(rewards_t, dtype=torch.float32)
+                if dones_t.numel() > 0:
+                    dones_t[-1] = 1.0
 
                 # GAE(lambda) returns
-                adv_t, ret_t = compute_gae_from_values(rewards_t, values_t, gamma=gamma, lam=0.95)
+                adv_t, ret_t = compute_gae_from_values(rewards_t, values_t, dones_t, gamma=gamma, lam=0.95)
 
                 batch_logp.append(logprobs_t)
                 batch_val.append(values_t)
@@ -237,7 +240,7 @@ if __name__ == "__main__":
         win_rates,
     ) = train_selfplay(
         n_players=n_players,
-        batches=200,
+        batches=500,
         episodes_per_batch=64,  # Increased from 16 for more stable gradients
         lr=0.0005,
         entropy_beta=0.05,

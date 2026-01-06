@@ -25,6 +25,51 @@ class StepRecord:
     action: str | None = None
 
 
+def safe_categorical_from_logits(logits: torch.Tensor, candidates: list[Combo]) -> torch.distributions.Categorical:
+    """
+    Create a Categorical distribution from logits with stability checks.
+
+    Args:
+        logits: Raw logits tensor
+        candidates: List of candidate actions (for error reporting)
+
+    Returns:
+        Categorical distribution
+
+    Raises:
+        ValueError: If logits contain NaN/Inf or candidates are empty
+        RuntimeError: If softmax probabilities don't sum to 1 (within tolerance)
+    """
+    if len(candidates) == 0:
+        raise ValueError("Cannot create distribution from empty candidates list")
+
+    if logits.numel() != len(candidates):
+        raise ValueError(f"Logits length ({logits.numel()}) doesn't match candidates length ({len(candidates)})")
+
+    # Check for NaN/Inf
+    if torch.isnan(logits).any():
+        raise ValueError(f"NaN detected in logits. Candidates: {len(candidates)}")
+    if torch.isinf(logits).any():
+        raise ValueError(f"Inf detected in logits. Candidates: {len(candidates)}")
+
+    # Stabilize logits: subtract max to prevent overflow
+    logits_stable = logits - logits.max()
+
+    # Compute probabilities
+    probs = F.softmax(logits_stable, dim=0)
+
+    # Validate probability sum
+    prob_sum = probs.sum().item()
+    if abs(prob_sum - 1.0) > 1e-5:
+        raise RuntimeError(
+            f"Probabilities sum to {prob_sum:.8f}, expected 1.0. "
+            f"Logits range: [{logits.min().item():.4f}, {logits.max().item():.4f}], "
+            f"Candidates: {len(candidates)}"
+        )
+
+    return torch.distributions.Categorical(probs=probs)
+
+
 def select_action(
     policy: MLPPolicy, state: np.ndarray, candidates: list[Combo]
 ) -> tuple[Combo, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -33,13 +78,13 @@ def select_action(
     action_feats = [[combo_to_action_vector(c) for c in candidates]]
     logits_list, values = policy(st, action_feats)
     logits = logits_list[0]
-    # Softmax over candidate set
-    probs = F.softmax(logits, dim=0)
-    dist = torch.distributions.Categorical(probs=probs)
+    # Use safe Categorical creation
+    dist = safe_categorical_from_logits(logits, candidates)
     idx = dist.sample()
     logprob = dist.log_prob(idx)
     entropy = dist.entropy()
     # Compute max logprob across all actions
+    probs = dist.probs
     max_prob = probs.max()
     chosen = candidates[int(idx.item())]
     value = values[0]
@@ -191,11 +236,24 @@ class OpponentMix:
     random_weight: float
 
     def get_weights_and_strategies(self) -> tuple[list[float], list[str]]:
-        """Return weights and strategy names in a consistent order."""
-        return (
-            [self.greedy_weight, self.smart_weight, self.current_weight, self.checkpoint_weight, self.random_weight],
-            ["greedy", "smart", "current", "checkpoint", "random"],
-        )
+        """Return normalized weights and strategy names in a consistent order.
+
+        Normalizing here prevents sampling failures if the configured weights
+        drift from summing to 1. A tiny drift only triggers the normalization
+        (not an error); a zero or negative total raises to surface bad configs.
+        """
+        raw_weights = [
+            self.greedy_weight,
+            self.smart_weight,
+            self.current_weight,
+            self.checkpoint_weight,
+            self.random_weight,
+        ]
+        total = sum(raw_weights)
+        if total <= 0:
+            raise ValueError("Opponent mix weights must sum to a positive value")
+        weights = [w / total for w in raw_weights]
+        return (weights, ["greedy", "smart", "current", "checkpoint", "random"])
 
 
 def play_evaluation_game(
@@ -299,13 +357,13 @@ class CheckpointManager:
 
     # Define opponent mix for each training stage
     STAGE_0 = OpponentMix(
-        greedy_weight=0.40, smart_weight=0.0, current_weight=0.30, checkpoint_weight=0.0, random_weight=0.30
+        greedy_weight=0.40, smart_weight=0.10, current_weight=0.25, checkpoint_weight=0.0, random_weight=0.25
     )
     STAGE_1 = OpponentMix(
-        greedy_weight=0.30, smart_weight=0.10, current_weight=0.35, checkpoint_weight=0.05, random_weight=0.10
+        greedy_weight=0.30, smart_weight=0.15, current_weight=0.35, checkpoint_weight=0.05, random_weight=0.15
     )
     STAGE_2 = OpponentMix(
-        greedy_weight=0.20, smart_weight=0.20, current_weight=0.45, checkpoint_weight=0.10, random_weight=0.05
+        greedy_weight=0.15, smart_weight=0.25, current_weight=0.40, checkpoint_weight=0.10, random_weight=0.10
     )
 
     def __init__(self, checkpoint_dir: str = "big2", device: str = "cpu", n_players: int = 4):
@@ -338,9 +396,9 @@ class CheckpointManager:
         Stage 1: 0.20 ≤ win_rate < 0.30 → add a bit of smart/self-play
         Stage 2: win_rate ≥ 0.30 → more self-play and smart, less random
         """
-        if win_rate >= 0.30 and self.greedy_schedule_stage < 2:
+        if win_rate >= 0.35 and self.greedy_schedule_stage < 2:
             self.greedy_schedule_stage = 2
-        elif win_rate >= 0.20 and self.greedy_schedule_stage < 1:
+        elif win_rate >= 0.25 and self.greedy_schedule_stage < 1:
             self.greedy_schedule_stage = 1
 
     def sample_opponent_policy(self, current_policy: MLPPolicy) -> MLPPolicy | Callable:
@@ -379,26 +437,31 @@ class CheckpointManager:
 
 
 def compute_gae_from_values(
-    rewards: torch.Tensor, values: torch.Tensor, gamma: float, lam: float
+    rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, gamma: float, lam: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute Generalized Advantage Estimation (GAE).
+    Compute Generalized Advantage Estimation (GAE) with explicit episode boundaries.
 
-    rewards: [T]  (on that player's decision steps; typically 0,...,0, ±1 at the end)
-    values:  [T]  (V(s_t) at each of those steps)
-    returns: [T]  = advantages + values (used as targets for value function)
+    Args:
+        rewards: [T] rewards for each step
+        values: [T] value predictions for each step
+        dones: [T] tensor with 1.0 at terminal steps, 0.0 otherwise
+        gamma: discount factor
+        lam: GAE lambda
+
+    Returns:
+        advantages: [T]
+        returns: [T] = advantages + values_detached
     """
     T = values.size(0)
-    # Detach values to avoid backprop through advantage computation
     values_detached = values.detach()
-    # v_next is values shifted left, with 0 bootstrap at the last step (episode end)
-    v_next = torch.cat([values_detached[1:], torch.zeros(1, device=values.device, dtype=values.dtype)])
-    deltas = rewards + gamma * v_next - values_detached
-
     adv = torch.zeros_like(values_detached)
     gae = 0.0
     for t in range(T - 1, -1, -1):
-        gae = deltas[t] + gamma * lam * gae
+        next_nonterminal = 1.0 - dones[t]
+        v_next = values_detached[t + 1] if t + 1 < T else torch.zeros((), device=values.device, dtype=values.dtype)
+        delta = rewards[t] + gamma * v_next * next_nonterminal - values_detached[t]
+        gae = delta + gamma * lam * next_nonterminal * gae
         adv[t] = gae
     returns = adv + values_detached
     return adv, returns
