@@ -12,6 +12,7 @@ from big2.nn import MLPPolicy, combo_to_action_vector
 from big2.simulator.cards import PASS, Combo, card_name
 from big2.simulator.env import Big2Env
 from big2.simulator.greedy_strategy import greedy_strategy
+from big2.simulator.smart_strategy import smart_strategy
 
 
 @dataclass
@@ -84,6 +85,9 @@ def episode(
             if isinstance(strategy, MLPPolicy):
                 # Policy-based opponent (current policy or past checkpoint)
                 action = select_action_greedy(strategy, state, candidates)
+            elif strategy == smart_strategy:
+                # Smart strategy needs hand and trick_pile
+                action = strategy(candidates, env.hands[p], env.trick_pile)
             elif strategy == greedy_strategy or strategy == random_strategy:
                 # Simple function strategy
                 action = strategy(candidates)
@@ -170,9 +174,28 @@ class EvaluationMetrics:
 
     win_rate_vs_greedy: float
     win_rate_vs_random: float
+    win_rate_vs_smart: float
     avg_cards_remaining_when_losing: float
     win_rate_by_starting_position: dict[int, float]
     total_games: int
+
+
+@dataclass
+class OpponentMix:
+    """Defines the distribution of opponent strategies for a training stage."""
+
+    greedy_weight: float
+    smart_weight: float
+    current_weight: float
+    checkpoint_weight: float
+    random_weight: float
+
+    def get_weights_and_strategies(self) -> tuple[list[float], list[str]]:
+        """Return weights and strategy names in a consistent order."""
+        return (
+            [self.greedy_weight, self.smart_weight, self.current_weight, self.checkpoint_weight, self.random_weight],
+            ["greedy", "smart", "current", "checkpoint", "random"],
+        )
 
 
 def play_evaluation_game(
@@ -201,7 +224,11 @@ def play_evaluation_game(
         if p == 0:
             action = select_action_greedy(current_policy, state, candidates)
         else:
-            action = opponent_strategy(candidates)
+            # Handle smart_strategy which needs hand and trick_pile
+            if opponent_strategy == smart_strategy:
+                action = opponent_strategy(candidates, env.hands[p], env.trick_pile)
+            else:
+                action = opponent_strategy(candidates)
 
         state, _ = env.step(action)
 
@@ -220,6 +247,7 @@ def evaluate_against_greedy(
     """
     wins_vs_greedy = 0
     wins_vs_random = 0
+    wins_vs_smart = 0
     cards_remaining_sum = 0
     losses_count = 0
     wins_by_position: dict[int, int] = {}
@@ -244,14 +272,22 @@ def evaluate_against_greedy(
         if winner == 0:
             wins_vs_random += 1
 
+    # Evaluate against smart strategy
+    for _ in range(num_games):
+        winner, _, _ = play_evaluation_game(current_policy, n_players, opponent_strategy=smart_strategy, device=device)
+        if winner == 0:
+            wins_vs_smart += 1
+
     win_rate_vs_greedy = wins_vs_greedy / num_games
     win_rate_vs_random = wins_vs_random / num_games
+    win_rate_vs_smart = wins_vs_smart / num_games
     avg_cards_remaining = cards_remaining_sum / losses_count if losses_count > 0 else 0.0
     win_rate_by_position = {pos: wins_by_position.get(pos, 0) / games_by_position[pos] for pos in games_by_position}
 
     return EvaluationMetrics(
         win_rate_vs_greedy=win_rate_vs_greedy,
         win_rate_vs_random=win_rate_vs_random,
+        win_rate_vs_smart=win_rate_vs_smart,
         avg_cards_remaining_when_losing=avg_cards_remaining,
         win_rate_by_starting_position=win_rate_by_position,
         total_games=num_games,
@@ -260,6 +296,17 @@ def evaluate_against_greedy(
 
 class CheckpointManager:
     """Manages past checkpoints for opponent sampling."""
+
+    # Define opponent mix for each training stage
+    STAGE_0 = OpponentMix(
+        greedy_weight=0.20, smart_weight=0.35, current_weight=0.30, checkpoint_weight=0.15, random_weight=0
+    )
+    STAGE_1 = OpponentMix(
+        greedy_weight=0.10, smart_weight=0.25, current_weight=0.45, checkpoint_weight=0.20, random_weight=0
+    )
+    STAGE_2 = OpponentMix(
+        greedy_weight=0.05, smart_weight=0.2, current_weight=0.60, checkpoint_weight=0.15, random_weight=0
+    )
 
     def __init__(self, checkpoint_dir: str = "big2", device: str = "cpu", n_players: int = 4):
         self.checkpoint_dir = Path(checkpoint_dir)
@@ -287,50 +334,48 @@ class CheckpointManager:
         Update the greedy schedule stage based on win rate against greedy.
         Schedule only advances forward (never regresses).
 
-        Stage 0: win_rate < 0.20 → greedy 50%
-        Stage 1: 0.20 ≤ win_rate < 0.30 → greedy 25%
-        Stage 2: win_rate ≥ 0.30 → greedy 15%
+        Stage 0: win_rate < 0.25 → greedy 50%
+        Stage 1: 0.25 ≤ win_rate < 0.35 → greedy 25%
+        Stage 2: win_rate ≥ 0.35 → greedy 15%
         """
-        if win_rate >= 0.30 and self.greedy_schedule_stage < 2:
+        if win_rate >= 0.35 and self.greedy_schedule_stage < 2:
             self.greedy_schedule_stage = 2
-        elif win_rate >= 0.20 and self.greedy_schedule_stage < 1:
+        elif win_rate >= 0.25 and self.greedy_schedule_stage < 1:
             self.greedy_schedule_stage = 1
 
     def sample_opponent_policy(self, current_policy: MLPPolicy) -> MLPPolicy | Callable:
         """
         Sample an opponent policy/strategy based on the current greedy schedule stage.
         Returns either a policy or a callable strategy function.
-        This version is used in episode() where we need the actual state.
+
+        The stage determines the opponent mix:
+        - Stage 0 (<20% win rate): More greedy/smart to learn basics
+        - Stage 1 (20-30% win rate): Balanced mix with more self-play
+        - Stage 2 (≥30% win rate): Heavy self-play with occasional baselines
         """
-        r = random.random()
+        # Select the appropriate opponent mix based on stage
+        opponent_mix = [self.STAGE_0, self.STAGE_1, self.STAGE_2][self.greedy_schedule_stage]
+        weights, strategies = opponent_mix.get_weights_and_strategies()
 
-        # Determine probabilities based on schedule stage
-        if self.greedy_schedule_stage == 0:
-            # Stage 0: <20% win rate → greedy 50%, current 37.5%, checkpoints 12.5%
-            greedy_prob = 0.5
-            current_prob = 0.375
-        elif self.greedy_schedule_stage == 1:
-            # Stage 1: 20-30% win rate → greedy 25%, current 56.25%, checkpoints 18.75%
-            greedy_prob = 0.25
-            current_prob = 0.5625
-        else:  # stage == 2
-            # Stage 2: >=30% win rate → greedy 10%, current 70%, checkpoints 20%
-            greedy_prob = 0.1
-            current_prob = 0.7
+        # Sample strategy type using weighted random choice
+        chosen_strategy = np.random.choice(strategies, p=weights)
 
-        if r < greedy_prob:
-            # Greedy baseline
+        if chosen_strategy == "greedy":
             return greedy_strategy
-        elif r < greedy_prob + current_prob:
-            # Current policy (self-play)
+        elif chosen_strategy == "smart":
+            return smart_strategy
+        elif chosen_strategy == "current":
             return current_policy
-        elif len(self.checkpoints) > 0:
-            # Past checkpoints (last 5)
-            _, checkpoint_policy = random.choice(self.checkpoints[-5:])
-            return checkpoint_policy
-        else:
-            # Fallback to current policy if no checkpoints available
-            return current_policy
+        elif chosen_strategy == "checkpoint":
+            if len(self.checkpoints) > 0:
+                # Sample from last 5 checkpoints
+                _, checkpoint_policy = random.choice(self.checkpoints[-5:])
+                return checkpoint_policy
+            else:
+                # Fallback to random if no checkpoints available
+                return random_strategy
+        else:  # random
+            return random_strategy
 
 
 def compute_gae_from_values(

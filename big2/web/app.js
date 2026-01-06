@@ -259,7 +259,7 @@ function updateLegalMoves(moves) {
 
 function updateBotSuggestion(botSuggestion, isHumanTurn) {
     const suggestionContainer = document.getElementById("bot-suggestion");
-    
+
     if (!isHumanTurn) {
         suggestionContainer.innerHTML = '<p class="no-suggestion">Waiting for your turn...</p>';
         return;
@@ -273,7 +273,7 @@ function updateBotSuggestion(botSuggestion, isHumanTurn) {
     // Display the bot's suggested move
     let suggestionHtml = `<div class="bot-suggestion-content">`;
     suggestionHtml += `<div class="bot-suggestion-text"><strong>Bot would play:</strong> ${botSuggestion.display}</div>`;
-    
+
     // If the suggestion has cards, show them visually
     if (botSuggestion.cards && botSuggestion.cards.length > 0) {
         const cardsHtml = botSuggestion.cards
@@ -293,7 +293,7 @@ function updateBotSuggestion(botSuggestion, isHumanTurn) {
             .join("");
         suggestionHtml += `<div class="bot-suggestion-cards">${cardsHtml}</div>`;
     }
-    
+
     suggestionHtml += `</div>`;
     suggestionContainer.innerHTML = suggestionHtml;
 }

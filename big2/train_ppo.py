@@ -12,6 +12,7 @@ from big2.nn import MLPPolicy, combo_to_action_vector
 from big2.simulator.cards import PASS, Combo, card_name
 from big2.simulator.env import Big2Env
 from big2.simulator.greedy_strategy import greedy_strategy
+from big2.simulator.smart_strategy import smart_strategy
 from big2.train_helpers import (
     CheckpointManager,
     compute_gae_from_values,
@@ -39,7 +40,7 @@ def collect_ppo_trajectories(
     env: Big2Env,
     policy: MLPPolicy,
     episodes_per_batch: int,
-    opponent_strategies: dict[int, MLPPolicy | Callable[[list[Combo]], Combo]],
+    opponent_strategies: dict[int, MLPPolicy | Callable],
     model_players: set[int],
     device: str,
 ) -> dict[int, list[PPOStepRecord]]:
@@ -64,6 +65,9 @@ def collect_ppo_trajectories(
                 strategy = opponent_strategies[p]
                 if isinstance(strategy, MLPPolicy):
                     action = select_action_greedy(strategy, state, candidates)
+                elif strategy == smart_strategy:
+                    # Smart strategy needs hand and trick_pile
+                    action = strategy(candidates, env.hands[p], env.trick_pile)
                 elif strategy == greedy_strategy or strategy == random_strategy:
                     action = strategy(candidates)
                 else:
@@ -117,6 +121,146 @@ def collect_ppo_trajectories(
                 break
 
             state = next_state
+
+    return trajectories
+
+
+def collect_ppo_trajectories_batched(
+    n_players: int,
+    policy: MLPPolicy,
+    episodes_per_batch: int,
+    opponent_strategies: dict[int, MLPPolicy | Callable],
+    model_players: set[int],
+    device: str,
+) -> dict[int, list[PPOStepRecord]]:
+    """
+    Collect trajectories for PPO training with batched forward passes.
+    Runs multiple environments in parallel for improved efficiency.
+
+    Args:
+        n_players: Number of players in the game
+        policy: The policy network
+        episodes_per_batch: Number of episodes to collect
+        opponent_strategies: Mapping of opponent player IDs to their strategies
+        model_players: Set of player IDs controlled by the model
+        device: Device to run on
+
+    Returns:
+        Dictionary mapping model player IDs to lists of step records
+    """
+    trajectories: dict[int, list[PPOStepRecord]] = {p: [] for p in model_players}
+
+    # Create multiple environments to run in parallel
+    envs = [Big2Env(n_players) for _ in range(episodes_per_batch)]
+    states = [env.reset() for env in envs]
+    episode_trajs: list[dict[int, list[PPOStepRecord]]] = [
+        {p: [] for p in model_players} for _ in range(episodes_per_batch)
+    ]
+    active_envs = list(range(episodes_per_batch))
+
+    while active_envs:
+        # Collect all environments and their current state
+        env_actions = {}  # Maps env_idx to action to take
+
+        # First, collect info for all active environments
+        env_info = []  # List of (env_idx, env, p, candidates)
+        for env_idx in active_envs:
+            env = envs[env_idx]
+            p = env.current_player
+            candidates = env.legal_candidates(p)
+            if not candidates:
+                candidates = [Combo(PASS, [], ())]
+            env_info.append((env_idx, env, p, candidates))
+
+        # Batch process model players
+        batch_states = []
+        batch_candidates = []
+        batch_env_indices = []
+        batch_players = []
+
+        for env_idx, _, p, candidates in env_info:
+            if p in model_players:
+                batch_states.append(states[env_idx])
+                batch_candidates.append(candidates)
+                batch_env_indices.append(env_idx)
+                batch_players.append(p)
+
+        # Batch forward pass for all model players
+        if batch_states:
+            state_tensor = torch.from_numpy(np.array(batch_states)).long().to(device)
+            action_feats_batch = [[combo_to_action_vector(c) for c in cands] for cands in batch_candidates]
+
+            with torch.no_grad():
+                logits_list, values = policy(state_tensor, action_feats_batch)
+
+            # Store results for each environment
+            for i, env_idx in enumerate(batch_env_indices):
+                logits = logits_list[i]
+                probs = F.softmax(logits, dim=0)
+                dist = torch.distributions.Categorical(probs=probs)
+                idx = dist.sample()
+                old_logprob = dist.log_prob(idx)
+                value = values[i]
+
+                action_idx = int(idx.item())
+                action = batch_candidates[i][action_idx]
+
+                # Store trajectory record
+                episode_trajs[env_idx][batch_players[i]].append(
+                    PPOStepRecord(
+                        state=batch_states[i].copy(),
+                        action_idx=action_idx,
+                        candidates=batch_candidates[i],
+                        old_logprob=old_logprob.detach(),
+                        reward=0.0,
+                        value=value.detach(),
+                    )
+                )
+
+                env_actions[env_idx] = action
+
+        # Process opponent players
+        for env_idx, env, p, candidates in env_info:
+            if env_idx not in env_actions:  # Not already processed as model player
+                if p in opponent_strategies:
+                    strategy = opponent_strategies[p]
+                    if isinstance(strategy, MLPPolicy):
+                        action = select_action_greedy(strategy, states[env_idx], candidates)
+                    elif strategy == smart_strategy:
+                        action = strategy(candidates, env.hands[p], env.trick_pile)
+                    elif strategy == greedy_strategy or strategy == random_strategy:
+                        action = strategy(candidates)
+                    else:
+                        action = greedy_strategy(candidates)
+                else:
+                    action = greedy_strategy(candidates)
+                env_actions[env_idx] = action
+
+        # Step all active environments
+        next_active_envs = []
+        for env_idx in active_envs:
+            env = envs[env_idx]
+            action = env_actions[env_idx]
+            next_state, done = env.step(action)
+
+            if done:
+                # Assign terminal rewards
+                winner = env.winner
+                for q in model_players:
+                    if len(episode_trajs[env_idx][q]) > 0:
+                        final_r = (
+                            sum(len(env.hands[i]) for i in range(env.n_players) if i != q)
+                            if q == winner
+                            else -len(env.hands[q])
+                        )
+                        episode_trajs[env_idx][q][-1].reward = final_r
+                        # Append to full trajectories
+                        trajectories[q].extend(episode_trajs[env_idx][q])
+            else:
+                states[env_idx] = next_state
+                next_active_envs.append(env_idx)
+
+        active_envs = next_active_envs
 
     return trajectories
 
@@ -276,6 +420,7 @@ def train_ppo(
     eval_interval=50,
     eval_games=500,
     mini_batch_size=None,
+    use_batched_collection=True,
 ):
     """
     Train using Proximal Policy Optimization (PPO).
@@ -296,6 +441,7 @@ def train_ppo(
         eval_interval: Evaluation interval
         eval_games: Number of games for evaluation
         mini_batch_size: Mini-batch size (None = use full batch)
+        use_batched_collection: Whether to use batched trajectory collection (parallel envs)
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -357,9 +503,14 @@ def train_ppo(
         for opp_id in opponent_players:
             opponent_strategies[opp_id] = checkpoint_manager.sample_opponent_policy(policy)
 
-        trajectories = collect_ppo_trajectories(
-            env, policy, episodes_per_batch, opponent_strategies, model_players, device
-        )
+        if use_batched_collection:
+            trajectories = collect_ppo_trajectories_batched(
+                n_players, policy, episodes_per_batch, opponent_strategies, model_players, device
+            )
+        else:
+            trajectories = collect_ppo_trajectories(
+                env, policy, episodes_per_batch, opponent_strategies, model_players, device
+            )
 
         # PPO update
         policy_loss, value_loss, entropy, total_loss = ppo_update(
@@ -415,6 +566,10 @@ def train_ppo(
             wr_str += f" ({wins_vs_greedy}/{metrics.total_games} wins)"
             print(wr_str)
             print(f"  Win rate vs random: {metrics.win_rate_vs_random:.2%}")
+            wins_vs_smart = int(metrics.win_rate_vs_smart * metrics.total_games)
+            wr_smart_str = f"  Win rate vs smart: {metrics.win_rate_vs_smart:.2%}"
+            wr_smart_str += f" ({wins_vs_smart}/{metrics.total_games} wins)"
+            print(wr_smart_str)
             print(f"  Avg cards remaining when losing: {metrics.avg_cards_remaining_when_losing:.2f}")
             print("  Win rate by starting position:")
             for pos, wr in sorted(metrics.win_rate_by_starting_position.items()):
