@@ -712,11 +712,6 @@ def train_ppo(
 
 
 if __name__ == "__main__":
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
-    print(torch.get_num_threads())  # should be 1
-    print(torch.get_num_interop_threads())  # should be 1
-
     if torch.cuda.is_available():
         device = "cuda"
     else:
