@@ -227,6 +227,18 @@ class EvaluationMetrics:
 
 
 @dataclass
+class CurriculumConfig:
+    """Configuration for curriculum learning mastery thresholds."""
+
+    greedy_mastery_target: float = 0.40  # 40% win rate = mastered greedy
+    smart_mastery_target: float = 0.35  # 35% win rate = mastered smart
+    greedy_retention_fraction: float = 0.125  # 12.5% weight for retention of mastered greedy
+    smart_retention_fraction: float = 0.175  # 17.5% weight for retention of mastered smart
+    ema_alpha: float = 0.33  # Smoothing factor for EMA
+    max_checkpoints: int = 20  # Keep last N checkpoints
+
+
+@dataclass
 class OpponentMix:
     """Defines the distribution of opponent strategies for a training stage."""
 
@@ -356,27 +368,24 @@ def evaluate_against_greedy(
 class CheckpointManager:
     """Manages past checkpoints for opponent sampling with mastery-based curriculum learning."""
 
-    # Mastery targets: win rate thresholds for considering an opponent type "mastered"
-    GREEDY_MASTERY_TARGET = 0.40  # 40% win rate = mastered greedy
-    SMART_MASTERY_TARGET = 0.35  # 35% win rate = mastered smart
-    GREEDY_RETENTION_FRACTION = 0.125  # 12.5% weight for retention of mastered greedy (target: 10-15%)
-    SMART_RETENTION_FRACTION = 0.175  # 17.5% weight for retention of mastered smart (target: 15-20%)
-
     def __init__(
         self,
         checkpoint_dir: str = "big2",
         device: str = "cpu",
         n_players: int = 4,
-        ema_alpha: float = 0.33,
+        curriculum_config: CurriculumConfig | None = None,
     ):
         self.checkpoint_dir = Path(checkpoint_dir)
         self.device = device
         self.n_players = n_players
         self.checkpoints: list[tuple[int, nn.Module]] = []  # (step, policy)
-        self.max_checkpoints = 20  # Keep last 20 checkpoints
+
+        # Use provided config or defaults
+        self.config = curriculum_config or CurriculumConfig()
+        self.max_checkpoints = self.config.max_checkpoints
 
         # Mastery tracking with EMA (Exponential Moving Average) for stability
-        self.ema_alpha = ema_alpha  # Smoothing factor for EMA
+        self.ema_alpha = self.config.ema_alpha
         self.ema_win_rate_greedy: float | None = None
         self.ema_win_rate_smart: float | None = None
         self.mastery_greedy = 0.0  # Mastery level for greedy (0.0-1.0)
@@ -418,8 +427,8 @@ class CheckpointManager:
             self.ema_win_rate_smart = self.ema_alpha * win_rate_smart + (1 - self.ema_alpha) * self.ema_win_rate_smart
 
         # Compute mastery scores (clipped to [0, 1])
-        self.mastery_greedy = min(1.0, max(0.0, self.ema_win_rate_greedy / self.GREEDY_MASTERY_TARGET))
-        self.mastery_smart = min(1.0, max(0.0, self.ema_win_rate_smart / self.SMART_MASTERY_TARGET))
+        self.mastery_greedy = min(1.0, max(0.0, self.ema_win_rate_greedy / self.config.greedy_mastery_target))
+        self.mastery_smart = min(1.0, max(0.0, self.ema_win_rate_smart / self.config.smart_mastery_target))
 
     def compute_dynamic_opponent_mix(self) -> OpponentMix:
         """
@@ -441,15 +450,15 @@ class CheckpointManager:
             random_weight = 0.10 - 0.05 * self.mastery_greedy  # 10-5% gradually decreasing
         elif self.mastery_smart < 1.0:
             # Phase 2: Focus on learning smart, retain greedy
-            greedy_weight = self.GREEDY_RETENTION_FRACTION
+            greedy_weight = self.config.greedy_retention_fraction
             smart_weight = 0.45 + 0.05 * (1.0 - self.mastery_smart)  # 45-50% when learning
             current_weight = 0.25 + 0.05 * self.mastery_smart  # 25-30% gradually increasing
             checkpoint_weight = 0.10 + 0.05 * self.mastery_smart  # 10-15% gradually increasing
             random_weight = 0.05
         else:
             # Phase 3: Both mastered, focus on self-play
-            greedy_weight = self.GREEDY_RETENTION_FRACTION
-            smart_weight = self.SMART_RETENTION_FRACTION
+            greedy_weight = self.config.greedy_retention_fraction
+            smart_weight = self.config.smart_retention_fraction
             # Remaining weight for self-play (current + checkpoint) and random
             remaining_weight = 1.0 - greedy_weight - smart_weight - 0.05  # Reserve 5% for random
             current_weight = remaining_weight * 0.75  # 75% of remaining to current policy

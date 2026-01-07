@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -10,6 +12,42 @@ DROPOUT_RATE = 0.1
 # Action vector dimensions:
 # 52 (card flags) + 1 (pass flag) + 9 (combo type) + 1 (num_cards) + 13 (key rank) + 4 (key suit) = 80
 ACTION_VECTOR_DIM = 80
+
+
+@dataclass
+class MLPPolicyConfig:
+    """Configuration for MLPPolicy architecture."""
+
+    n_players: int = 4
+    card_vocab: int = 53
+    card_emb_dim: int = 32
+    hidden: int = 1024
+    action_hidden: int = 256
+    device: str = "cpu"
+
+
+@dataclass
+class SetPoolPolicyConfig:
+    """Configuration for SetPoolPolicy architecture."""
+
+    n_players: int = 4
+    card_vocab: int = 53
+    card_emb_dim: int = 64
+    hidden: int = 768
+    action_hidden: int = 256
+    device: str = "cpu"
+
+
+@dataclass
+class MLPQNetworkConfig:
+    """Configuration for MLPQNetwork architecture."""
+
+    n_players: int = 4
+    card_vocab: int = 53
+    card_emb_dim: int = 32
+    hidden: int = 1024
+    action_hidden: int = 256
+    device: str = "cpu"
 
 
 def input_dim(n_players: int = 4) -> int:
@@ -105,20 +143,92 @@ def _pool_card_embeddings(emb: torch.Tensor, mask: torch.Tensor) -> torch.Tensor
     return summed / denom
 
 
-def make_policy(arch: str, *, n_players: int = 4, device: str = "cpu") -> nn.Module:
+def make_policy(
+    arch: str,
+    *,
+    config: MLPPolicyConfig | SetPoolPolicyConfig | None = None,
+    n_players: int = 4,
+    device: str = "cpu",
+    **kwargs,
+) -> nn.Module:
     """
     Factory for policy networks.
 
     Keeping a central factory lets training/eval code swap architectures without
     sprinkling class names everywhere (important for checkpoint opponents).
+
+    Args:
+        arch: Architecture name ("mlp" or "setpool")
+        config: Optional config dataclass. If None, constructs from kwargs for backward compatibility.
+        n_players: Number of players (used if config is None)
+        device: Device to use (used if config is None)
+        **kwargs: Additional parameters for backward compatibility (card_vocab, card_emb_dim, hidden, action_hidden)
     """
     arch_norm = arch.lower().strip()
+
+    if config is None:
+        # Backward compatibility: construct config from kwargs
+        if arch_norm in {"mlp", "mlppolicy"}:
+            config = MLPPolicyConfig(
+                n_players=n_players,
+                device=device,
+                card_vocab=kwargs.get("card_vocab", 53),
+                card_emb_dim=kwargs.get("card_emb_dim", 32),
+                hidden=kwargs.get("hidden", 1024),
+                action_hidden=kwargs.get("action_hidden", 256),
+            )
+        elif arch_norm in {"setpool", "set_pool", "pooled"}:
+            config = SetPoolPolicyConfig(
+                n_players=n_players,
+                device=device,
+                card_vocab=kwargs.get("card_vocab", 53),
+                card_emb_dim=kwargs.get("card_emb_dim", 64),
+                hidden=kwargs.get("hidden", 768),
+                action_hidden=kwargs.get("action_hidden", 256),
+            )
+        else:
+            raise ValueError(f"Unknown policy arch: {arch!r}. Expected one of: mlp, setpool")
+
     if arch_norm in {"mlp", "mlppolicy"}:
+        if not isinstance(config, MLPPolicyConfig):
+            # Convert SetPoolPolicyConfig to MLPPolicyConfig if needed
+            config = MLPPolicyConfig(
+                n_players=config.n_players,
+                card_vocab=config.card_vocab,
+                card_emb_dim=config.card_emb_dim,
+                hidden=config.hidden,
+                action_hidden=config.action_hidden,
+                device=config.device,
+            )
         print("Using MLPPolicy")
-        return MLPPolicy(n_players=n_players, device=device)
+        return MLPPolicy(
+            n_players=config.n_players,
+            card_vocab=config.card_vocab,
+            card_emb_dim=config.card_emb_dim,
+            hidden=config.hidden,
+            action_hidden=config.action_hidden,
+            device=config.device,
+        )
     if arch_norm in {"setpool", "set_pool", "pooled"}:
+        if not isinstance(config, SetPoolPolicyConfig):
+            # Convert MLPPolicyConfig to SetPoolPolicyConfig if needed
+            config = SetPoolPolicyConfig(
+                n_players=config.n_players,
+                card_vocab=config.card_vocab,
+                card_emb_dim=config.card_emb_dim,
+                hidden=config.hidden,
+                action_hidden=config.action_hidden,
+                device=config.device,
+            )
         print("Using SetPoolPolicy")
-        return SetPoolPolicy(n_players=n_players, device=device)
+        return SetPoolPolicy(
+            n_players=config.n_players,
+            card_vocab=config.card_vocab,
+            card_emb_dim=config.card_emb_dim,
+            hidden=config.hidden,
+            action_hidden=config.action_hidden,
+            device=config.device,
+        )
     raise ValueError(f"Unknown policy arch: {arch!r}. Expected one of: mlp, setpool")
 
 

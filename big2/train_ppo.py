@@ -23,6 +23,7 @@ from big2.train_helpers import (
     select_action_greedy,
     value_of_starting_hand,
 )
+from big2.train_ppo_config import PPOConfig, dump_training_run
 
 
 @dataclass
@@ -470,6 +471,7 @@ def ppo_update(
 
 
 def train_ppo(
+    config: PPOConfig | None = None,
     n_players=4,
     batches=2000,
     episodes_per_batch=10,
@@ -487,73 +489,78 @@ def train_ppo(
     mini_batch_size=None,
     use_batched_collection=True,
     policy_arch: str = "mlp",
+    **kwargs,
 ):
     """
     Train using Proximal Policy Optimization (PPO).
 
     Args:
-        n_players: Number of players
-        batches: Number of training batches
-        episodes_per_batch: Episodes to collect per batch
-        ppo_epochs: Number of PPO update epochs per batch
-        clip_epsilon: PPO clipping parameter
-        lr: Learning rate
-        entropy_beta: Entropy coefficient
-        value_coef: Value loss coefficient
-        gamma: Discount factor
-        lam: GAE lambda parameter
-        seed: Random seed
-        device: Device to use
-        eval_interval: Evaluation interval
-        eval_games: Number of games for evaluation
-        mini_batch_size: Mini-batch size (None = use full batch)
-        use_batched_collection: Whether to use batched trajectory collection (parallel envs)
+        config: PPOConfig instance. If None, creates from kwargs for backward compatibility.
+        **kwargs: Individual parameters (deprecated, use config instead)
     """
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    if config is None:
+        # Backward compatibility: construct config from kwargs
+        config = PPOConfig(
+            n_players=n_players,
+            batches=batches,
+            episodes_per_batch=episodes_per_batch,
+            ppo_epochs=ppo_epochs,
+            clip_epsilon=clip_epsilon,
+            lr=lr,
+            entropy_beta=entropy_beta,
+            value_coef=value_coef,
+            gamma=gamma,
+            lam=lam,
+            seed=seed,
+            device=device,
+            eval_interval=eval_interval,
+            eval_games=eval_games,
+            mini_batch_size=mini_batch_size,
+            use_batched_collection=use_batched_collection,
+            policy_arch=policy_arch,
+            **kwargs,
+        )
 
-    all_players = set(range(n_players))
+    random.seed(config.seed)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+
+    all_players = set(range(config.n_players))
 
     print("Training across seats: enabled (one model-controlled seat per environment, rotated each batch)")
     print("Opponent diversity within batch: enabled (opponents sampled per-environment/per-seat)")
-    print(f"PPO parameters: epochs={ppo_epochs}, clip_epsilon={clip_epsilon}")
-    print(f"Policy architecture: {policy_arch}")
+    print(f"PPO parameters: epochs={config.ppo_epochs}, clip_epsilon={config.clip_epsilon}")
+    print(f"Policy architecture: {config.policy_arch}")
     print(
         "Opponent mixture: Mastery-based curriculum learning "
         "(Phase 1: Learn greedy 50-60%, Phase 2: Learn smart 45-50% with greedy retention, "
         "Phase 3: Self-play 55-65% with retention of mastered opponents)"
     )
 
-    env = Big2Env(n_players)
-    policy = make_policy(policy_arch, n_players=n_players, device=device).to(device)
-    optimizer = optim.Adam(policy.parameters(), lr=lr)
+    env = Big2Env(config.n_players)
+    policy = make_policy(config.policy_arch, n_players=config.n_players, device=config.device).to(config.device)
+    optimizer = optim.Adam(policy.parameters(), lr=config.lr)
 
     # Checkpoint manager for opponent sampling
-    checkpoint_manager = CheckpointManager(device=device, n_players=n_players)
+    checkpoint_manager = CheckpointManager(device=config.device, n_players=config.n_players)
 
     # Learning rate scheduler: warmup + cosine annealing
-    warmup_batches = batches // 10  # 10% warmup
+    warmup_batches = int(config.batches * config.warmup_fraction)
 
     def lr_lambda(current_batch):
-        min_lr_ratio = 0.1  # LR won't drop below 50% of initial
         if current_batch < warmup_batches:
             # Linear warmup
-            return current_batch / warmup_batches
+            return current_batch / warmup_batches if warmup_batches > 0 else 1.0
         else:
             # Cosine annealing after warmup (with floor)
-            progress = (current_batch - warmup_batches) / (batches - warmup_batches)
+            progress = (current_batch - warmup_batches) / (config.batches - warmup_batches)
             cosine_decay = 0.5 * (1 + np.cos(np.pi * progress))
-            return min_lr_ratio + (1 - min_lr_ratio) * cosine_decay
+            return config.min_lr_ratio + (1 - config.min_lr_ratio) * cosine_decay
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Adaptive entropy coefficient
-    current_entropy_beta = entropy_beta
-    target_entropy_start = 0.8  # Target entropy level
-    target_entropy_end = 0.45
-    entropy_beta_min = 0.05
-    entropy_beta_max = 0.2
+    current_entropy_beta = config.entropy_beta
 
     # Track losses for plotting
     loss_history = []
@@ -566,16 +573,16 @@ def train_ppo(
     win_rates = []
     win_rates_smart = []
 
-    for batch in tqdm(range(1, batches + 1)):
+    for batch in tqdm(range(1, config.batches + 1)):
         # Collect trajectories
         # Rotate model seat across environments to learn from all positions.
-        base_seats = np.arange(episodes_per_batch) % n_players
-        perm = np.random.permutation(episodes_per_batch)
+        base_seats = np.arange(config.episodes_per_batch) % config.n_players
+        perm = np.random.permutation(config.episodes_per_batch)
         model_seats = [int(base_seats[i]) for i in perm]
-        frac = batch / batches
-        target_entropy = target_entropy_start + (target_entropy_end - target_entropy_start) * frac
+        frac = batch / config.batches
+        target_entropy = config.target_entropy_start + (config.target_entropy_end - config.target_entropy_start) * frac
         opponent_strategies_by_env: list[dict[int, nn.Module | Callable]] = []
-        for env_idx in range(episodes_per_batch):
+        for env_idx in range(config.episodes_per_batch):
             model_seat = model_seats[env_idx]
             opp_map: dict[int, nn.Module | Callable] = {}
             for p in all_players:
@@ -584,13 +591,18 @@ def train_ppo(
                 opp_map[p] = checkpoint_manager.sample_opponent_policy(policy)
             opponent_strategies_by_env.append(opp_map)
 
-        if use_batched_collection:
+        if config.use_batched_collection:
             trajectories = collect_ppo_trajectories_batched(
-                n_players, policy, episodes_per_batch, opponent_strategies_by_env, model_seats, device
+                config.n_players,
+                policy,
+                config.episodes_per_batch,
+                opponent_strategies_by_env,
+                model_seats,
+                config.device,
             )
         else:
             trajectories = collect_ppo_trajectories(
-                env, policy, episodes_per_batch, opponent_strategies_by_env, model_seats, device
+                env, policy, config.episodes_per_batch, opponent_strategies_by_env, model_seats, config.device
             )
 
         # PPO update
@@ -598,14 +610,14 @@ def train_ppo(
             policy,
             trajectories,
             optimizer,
-            ppo_epochs,
-            clip_epsilon,
-            value_coef,
+            config.ppo_epochs,
+            config.clip_epsilon,
+            config.value_coef,
             current_entropy_beta,
-            mini_batch_size,
-            device,
-            gamma=gamma,
-            lam=lam,
+            config.mini_batch_size,
+            config.device,
+            gamma=config.gamma,
+            lam=config.lam,
         )
 
         # Step the learning rate scheduler
@@ -614,10 +626,10 @@ def train_ppo(
         # Adaptive entropy coefficient: adjust based on current entropy
         if entropy < target_entropy - 0.15:
             # Entropy too low, encourage more exploration
-            current_entropy_beta = min(entropy_beta_max, current_entropy_beta * 1.01)
+            current_entropy_beta = min(config.entropy_beta_max, current_entropy_beta * 1.01)
         elif entropy > target_entropy + 0.15:
             # Entropy too high, allow more exploitation
-            current_entropy_beta = max(entropy_beta_min, current_entropy_beta * 0.99)
+            current_entropy_beta = max(config.entropy_beta_min, current_entropy_beta * 0.99)
 
         # Record losses
         loss_history.append(total_loss)
@@ -626,14 +638,16 @@ def train_ppo(
         entropy_history.append(entropy)
 
         # Evaluation every eval_interval batches
-        if batch % eval_interval == 0:
+        if batch % config.eval_interval == 0:
             total_steps = sum(len(v) for v in trajectories.values())
-            avg_steps_per_episode = total_steps / episodes_per_batch if episodes_per_batch > 0 else 0.0
+            avg_steps_per_episode = total_steps / config.episodes_per_batch if config.episodes_per_batch > 0 else 0.0
 
             # Comprehensive evaluation
             print(f"\n[Step {batch}] Evaluating policy...")
             policy.eval()
-            metrics = evaluate_against_greedy(policy, n_players, num_games=eval_games, device=device)
+            metrics = evaluate_against_greedy(
+                policy, config.n_players, num_games=config.eval_games, device=config.device
+            )
             policy.train()
 
             eval_episodes.append(batch)
@@ -661,7 +675,7 @@ def train_ppo(
             print(
                 f"[Step {batch}] loss={total_loss:.3f} pol={policy_loss:.3f} "
                 f"val={value_loss:.3f} ent={entropy:.3f} steps/model_ep={avg_steps_per_episode:.1f} "
-                f"({episodes_per_batch} episodes, ~{avg_steps_per_episode:.1f} steps/episode)"
+                f"({config.episodes_per_batch} episodes, ~{avg_steps_per_episode:.1f} steps/episode)"
             )
             print(f"[Step {batch}] lr={current_lr:.6f} ent_beta={current_entropy_beta:.4f}")
             n_checkpoints = len(checkpoint_manager.checkpoints)
@@ -686,6 +700,7 @@ def train_ppo(
 
     return (
         policy,
+        checkpoint_manager,
         loss_history,
         policy_loss_history,
         value_loss_history,
@@ -710,16 +725,8 @@ if __name__ == "__main__":
     n_players = 4
     cards_per_player = 52 // n_players
 
-    (
-        policy,
-        loss_history,
-        policy_loss_history,
-        value_loss_history,
-        entropy_history,
-        eval_episodes,
-        win_rates,
-        win_rates_smart,
-    ) = train_ppo(
+    # Create config with all training parameters
+    config = PPOConfig(
         n_players=n_players,
         batches=5000,
         episodes_per_batch=64,
@@ -738,6 +745,23 @@ if __name__ == "__main__":
         policy_arch="setpool",
     )
 
+    # Save config for reproducibility
+    config.save("training_config.json")
+    print("Training config saved to training_config.json")
+    # To load: config = PPOConfig.load("training_config.json")
+
+    (
+        policy,
+        checkpoint_manager,
+        loss_history,
+        policy_loss_history,
+        value_loss_history,
+        entropy_history,
+        eval_episodes,
+        win_rates,
+        win_rates_smart,
+    ) = train_ppo(config=config)
+
     hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
     val = value_of_starting_hand(policy, hand, n_players=n_players, sims=64, device=device)
     print("Random starting hand:", [card_name(c) for c in hand])
@@ -749,11 +773,12 @@ if __name__ == "__main__":
     print("Win rate:", val)
 
     # Save the trained model
-    save_path = "big2_model.pt"
-    torch.save(policy.state_dict(), save_path)
-    print(f"\nModel weights saved to {save_path}")
+    model_save_path = "big2_model.pt"
+    torch.save(policy.state_dict(), model_save_path)
+    print(f"\nModel weights saved to {model_save_path}")
 
     # Plot and save training curves
+    training_curves_path = "training_curves.png"
     plot_training_curves(
         loss_history,
         policy_loss_history,
@@ -763,4 +788,21 @@ if __name__ == "__main__":
         eval_episodes,
         win_rates,
         win_rates_smart,
+        save_path=training_curves_path,
+    )
+
+    # Dump all configs and results
+    dump_training_run(
+        config=config,
+        policy=policy,
+        loss_history=loss_history,
+        policy_loss_history=policy_loss_history,
+        value_loss_history=value_loss_history,
+        entropy_history=entropy_history,
+        eval_episodes=eval_episodes,
+        win_rates=win_rates,
+        win_rates_smart=win_rates_smart,
+        checkpoint_manager=checkpoint_manager,
+        model_save_path=model_save_path,
+        training_curves_path=training_curves_path,
     )
