@@ -13,8 +13,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from torch import nn
 
-from big2.nn import MLPPolicy, combo_to_action_vector
+from big2.nn import MLPPolicy, SetPoolPolicy, combo_to_action_vector
 from big2.simulator.cards import PAIR, PASS, SINGLE, TRIPLE, Combo, card_name
 from big2.simulator.env import Big2Env
 
@@ -43,7 +44,7 @@ def format_combo(combo: Combo) -> dict[str, Any]:
     }
 
 
-def ai_select_action(policy: MLPPolicy, state: np.ndarray, candidates: list[Combo]) -> Combo:
+def ai_select_action(policy: nn.Module, state: np.ndarray, candidates: list[Combo]) -> Combo:
     """Select an action for an AI player using the trained policy."""
     with torch.no_grad():
         st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)
@@ -54,10 +55,44 @@ def ai_select_action(policy: MLPPolicy, state: np.ndarray, candidates: list[Comb
         return candidates[idx]
 
 
+def ai_get_top_moves(
+    policy: nn.Module, state: np.ndarray, candidates: list[Combo], top_k: int = 3
+) -> list[dict[str, Any]]:
+    """Get the top-k moves with their relative probabilities."""
+    with torch.no_grad():
+        st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)
+        action_feats = [[combo_to_action_vector(c) for c in candidates]]
+        logits_list, values = policy(st, action_feats)
+        logits = logits_list[0]
+
+        # Convert logits to probabilities using softmax
+        probs = torch.softmax(logits, dim=0)
+
+        # Get top-k indices and probabilities
+        num_candidates = len(candidates)
+        k = min(top_k, num_candidates)
+        top_probs, top_indices = torch.topk(probs, k)
+
+        results = []
+        for i in range(k):
+            idx = int(top_indices[i].item())
+            prob = float(top_probs[i].item())
+            combo = candidates[idx]
+            results.append(
+                {
+                    **format_combo(combo),
+                    "probability": prob,
+                    "probability_pct": round(prob * 100, 1),
+                }
+            )
+
+        return results
+
+
 class GameState:
     """Manages game state for a single game session."""
 
-    def __init__(self, game_id: str, env: Big2Env, policy: MLPPolicy, human_player: int):
+    def __init__(self, game_id: str, env: Big2Env, policy: nn.Module, human_player: int):
         self.game_id = game_id
         self.env = env
         self.policy = policy
@@ -93,8 +128,7 @@ class GameState:
             try:
                 # Get the state from the human player's perspective
                 human_state = self.env._obs(self.human_player)
-                bot_action = ai_select_action(self.policy, human_state, candidates)
-                bot_suggestion = format_combo(bot_action)
+                bot_suggestion = ai_get_top_moves(self.policy, human_state, candidates, top_k=3)
             except Exception:
                 # If there's an error calculating bot suggestion, just skip it
                 bot_suggestion = None
@@ -132,11 +166,11 @@ class GameState:
 
 # Global state: in-memory game storage
 games: dict[str, GameState] = {}
-policy_cache: MLPPolicy | None = None
+policy_cache: nn.Module | None = None
 policy_config: dict[str, Any] = {}
 
 
-def load_policy(model_path: str, n_players: int, device: str) -> MLPPolicy:
+def load_policy(model_path: str, n_players: int, device: str) -> nn.Module:
     """Load and cache the policy model."""
     global policy_cache, policy_config
     # Resolve model path relative to big2 directory if not absolute
@@ -145,12 +179,45 @@ def load_policy(model_path: str, n_players: int, device: str) -> MLPPolicy:
 
     config_key = {"model_path": model_path, "n_players": n_players, "device": device}
     if policy_cache is None or policy_config != config_key:
-        policy = MLPPolicy(n_players=n_players, device=device).to(device)
-        policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+        try:
+            policy = MLPPolicy(n_players=n_players, device=device).to(device)
+            policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+        except Exception:
+            policy = SetPoolPolicy(n_players=n_players, device=device).to(device)
+            policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
         policy.eval()
         policy_cache = policy
         policy_config = config_key
     return policy_cache
+
+
+def _play_ai_turns(game_state: GameState) -> list[dict[str, Any]]:
+    """Play AI turns until it's the human's turn or game is over."""
+    ai_actions = []
+    while not game_state.env.done and game_state.env.current_player != game_state.human_player:
+        current_ai_player = game_state.env.current_player
+        ai_candidates = game_state.env.legal_candidates(current_ai_player)
+        if not ai_candidates:
+            ai_candidates = [Combo(PASS, [], ())]
+
+        ai_action = ai_select_action(game_state.policy, game_state.state, ai_candidates)
+        if ai_action.type != PASS:
+            game_state.last_trick_player = current_ai_player
+
+        ai_actions.append(
+            {
+                "player": current_ai_player,
+                "action": format_combo(ai_action),
+            }
+        )
+
+        game_state.state, _ = game_state.env.step(ai_action)
+
+        # Check if trick was cleared
+        if game_state.env.trick_pile is None or game_state.env.trick_pile.type == PASS:
+            game_state.last_trick_player = None
+
+    return ai_actions
 
 
 app = FastAPI(title="Big 2 Web Interface")
@@ -193,15 +260,21 @@ async def start_game(request: StartGameRequest) -> dict[str, Any]:
         # Create environment
         env = Big2Env(request.n_players)
 
-        # Human player is the one who starts (has 3♦)
-        human_player = env.current_player
+        # Assign human to a random player (not necessarily the one with 3♦)
+        human_player = np.random.randint(0, request.n_players)
 
         # Create game state
         game_id = str(uuid.uuid4())
         game_state = GameState(game_id, env, policy, human_player)
         games[game_id] = game_state
 
-        return game_state.to_dict()
+        # If it's not the human's turn, play AI turns until it is
+        ai_actions = _play_ai_turns(game_state)
+
+        result = game_state.to_dict()
+        if ai_actions:
+            result["ai_actions"] = ai_actions
+        return result
     except FileNotFoundError:
         raise HTTPException(
             status_code=404, detail=f"Model file '{request.model_path}' not found"
@@ -262,32 +335,10 @@ async def submit_action(game_id: str, action: ActionRequest) -> dict[str, Any]:
     # Execute human action
     if selected_action.type != PASS:
         game_state.last_trick_player = game_state.human_player
-    game_state.state, done = game_state.env.step(selected_action)
+    game_state.state, _ = game_state.env.step(selected_action)
 
     # Process AI turns until human turn or game over
-    ai_actions = []
-    while not game_state.env.done and game_state.env.current_player != game_state.human_player:
-        current_ai_player = game_state.env.current_player
-        ai_candidates = game_state.env.legal_candidates(current_ai_player)
-        if not ai_candidates:
-            ai_candidates = [Combo(PASS, [], ())]
-
-        ai_action = ai_select_action(game_state.policy, game_state.state, ai_candidates)
-        if ai_action.type != PASS:
-            game_state.last_trick_player = current_ai_player
-
-        ai_actions.append(
-            {
-                "player": current_ai_player,
-                "action": format_combo(ai_action),
-            }
-        )
-
-        game_state.state, done = game_state.env.step(ai_action)
-
-        # Check if trick was cleared
-        if game_state.env.trick_pile is None or game_state.env.trick_pile.type == PASS:
-            game_state.last_trick_player = None
+    ai_actions = _play_ai_turns(game_state)
 
     return {
         **game_state.to_dict(),

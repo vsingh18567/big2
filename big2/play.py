@@ -6,7 +6,7 @@ Interactive Big 2 game where you play against trained AI models.
 import numpy as np
 import torch
 
-from big2.nn import MLPPolicy, combo_to_action_vector
+from big2.nn import MLPPolicy, SetPoolPolicy, combo_to_action_vector
 from big2.simulator.cards import PAIR, PASS, SINGLE, TRIPLE, Combo, card_name
 from big2.simulator.env import Big2Env
 from big2.simulator.greedy_strategy import greedy_strategy
@@ -88,8 +88,13 @@ def play_interactive_game(model_path: str = "big2_model.pt", n_players: int = 4,
     print("\nLoading trained model...")
 
     # Load the trained model
-    policy = MLPPolicy(n_players=n_players, device=device).to(device)
-    policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    try:
+        policy = MLPPolicy(n_players=n_players, device=device).to(device)
+        policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    except Exception:
+        policy = SetPoolPolicy(n_players=n_players, device=device).to(device)
+        policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+
     policy.eval()
     print(f"✓ Model loaded from {model_path}")
 

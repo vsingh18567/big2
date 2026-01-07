@@ -7,8 +7,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import nn
 
-from big2.nn import MLPPolicy, combo_to_action_vector
+from big2.nn import combo_to_action_vector
 from big2.simulator.cards import PASS, Combo, card_name
 from big2.simulator.env import Big2Env
 from big2.simulator.greedy_strategy import greedy_strategy
@@ -71,10 +72,10 @@ def safe_categorical_from_logits(logits: torch.Tensor, candidates: list[Combo]) 
 
 
 def select_action(
-    policy: MLPPolicy, state: np.ndarray, candidates: list[Combo]
+    policy: nn.Module, state: np.ndarray, candidates: list[Combo]
 ) -> tuple[Combo, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # Prepare batch with one element
-    st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)
+    st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)  # type: ignore[attr-defined]
     action_feats = [[combo_to_action_vector(c) for c in candidates]]
     logits_list, values = policy(st, action_feats)
     logits = logits_list[0]
@@ -93,8 +94,8 @@ def select_action(
 
 def episode(
     env: Big2Env,
-    policy: MLPPolicy,
-    opponent_strategies: dict[int, MLPPolicy | Callable[[list[Combo]], Combo]] | None = None,
+    policy: nn.Module,
+    opponent_strategies: dict[int, nn.Module | Callable[[list[Combo]], Combo]] | None = None,
     model_players: set[int] | None = None,
 ):
     """
@@ -127,7 +128,7 @@ def episode(
         if p in opponent_strategies:
             # Opponent player: use provided strategy
             strategy = opponent_strategies[p]
-            if isinstance(strategy, MLPPolicy):
+            if isinstance(strategy, nn.Module):
                 # Policy-based opponent (current policy or past checkpoint)
                 action = select_action_greedy(strategy, state, candidates)
             elif strategy == smart_strategy:
@@ -197,10 +198,10 @@ def compute_returns(rewards: list[float], gamma: float = 1.0) -> list[float]:
     return returns
 
 
-def select_action_greedy(policy: MLPPolicy, state: np.ndarray, candidates: list[Combo]) -> Combo:
+def select_action_greedy(policy: nn.Module, state: np.ndarray, candidates: list[Combo]) -> Combo:
     """Select action greedily (no sampling) for evaluation."""
     with torch.no_grad():
-        st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)
+        st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)  # type: ignore[attr-defined]
         action_feats = [[combo_to_action_vector(c) for c in candidates]]
         logits_list, _ = policy(st, action_feats)
         logits = logits_list[0]
@@ -257,7 +258,7 @@ class OpponentMix:
 
 
 def play_evaluation_game(
-    current_policy: MLPPolicy,
+    current_policy: nn.Module,
     n_players: int,
     opponent_strategy: Callable[[list[Combo]], Combo] = greedy_strategy,
     device="cpu",
@@ -295,7 +296,7 @@ def play_evaluation_game(
 
 
 def evaluate_against_greedy(
-    current_policy: MLPPolicy, n_players: int, num_games: int = 500, device="cpu"
+    current_policy: nn.Module, n_players: int, num_games: int = 500, device="cpu"
 ) -> EvaluationMetrics:
     """
     Comprehensive evaluation of current policy.
@@ -353,34 +354,38 @@ def evaluate_against_greedy(
 
 
 class CheckpointManager:
-    """Manages past checkpoints for opponent sampling."""
+    """Manages past checkpoints for opponent sampling with mastery-based curriculum learning."""
 
-    # Define opponent mix for each training stage
-    STAGE_0 = OpponentMix(
-        greedy_weight=0.40, smart_weight=0.10, current_weight=0.25, checkpoint_weight=0.0, random_weight=0.25
-    )
-    STAGE_1 = OpponentMix(
-        greedy_weight=0.30, smart_weight=0.15, current_weight=0.35, checkpoint_weight=0.05, random_weight=0.15
-    )
-    STAGE_2 = OpponentMix(
-        greedy_weight=0.15, smart_weight=0.30, current_weight=0.35, checkpoint_weight=0.10, random_weight=0.10
-    )
-    STAGE_3 = OpponentMix(
-        greedy_weight=0.10, smart_weight=0.30, current_weight=0.40, checkpoint_weight=0.15, random_weight=0.05
-    )
+    # Mastery targets: win rate thresholds for considering an opponent type "mastered"
+    GREEDY_MASTERY_TARGET = 0.40  # 40% win rate = mastered greedy
+    SMART_MASTERY_TARGET = 0.35  # 35% win rate = mastered smart
+    GREEDY_RETENTION_FRACTION = 0.125  # 12.5% weight for retention of mastered greedy (target: 10-15%)
+    SMART_RETENTION_FRACTION = 0.175  # 17.5% weight for retention of mastered smart (target: 15-20%)
 
-    def __init__(self, checkpoint_dir: str = "big2", device: str = "cpu", n_players: int = 4):
+    def __init__(
+        self,
+        checkpoint_dir: str = "big2",
+        device: str = "cpu",
+        n_players: int = 4,
+        ema_alpha: float = 0.33,
+    ):
         self.checkpoint_dir = Path(checkpoint_dir)
         self.device = device
         self.n_players = n_players
-        self.checkpoints: list[tuple[int, MLPPolicy]] = []  # (step, policy)
+        self.checkpoints: list[tuple[int, nn.Module]] = []  # (step, policy)
         self.max_checkpoints = 20  # Keep last 20 checkpoints
-        self.greedy_schedule_stage = 0  # 0: <20%, 1: 20-30%, 2: >=30%
 
-    def add_checkpoint(self, step: int, policy: MLPPolicy):
+        # Mastery tracking with EMA (Exponential Moving Average) for stability
+        self.ema_alpha = ema_alpha  # Smoothing factor for EMA
+        self.ema_win_rate_greedy: float | None = None
+        self.ema_win_rate_smart: float | None = None
+        self.mastery_greedy = 0.0  # Mastery level for greedy (0.0-1.0)
+        self.mastery_smart = 0.0  # Mastery level for smart (0.0-1.0)
+
+    def add_checkpoint(self, step: int, policy: nn.Module):
         """Add a checkpoint to the pool."""
-        # Create a copy of the policy
-        checkpoint_policy = MLPPolicy(n_players=self.n_players, device=self.device).to(self.device)
+        # Create a copy of the policy (same architecture as the current policy)
+        checkpoint_policy = type(policy)(n_players=self.n_players, device=self.device).to(self.device)
         checkpoint_policy.load_state_dict(policy.state_dict())
         checkpoint_policy.eval()
 
@@ -390,35 +395,87 @@ class CheckpointManager:
         if len(self.checkpoints) > self.max_checkpoints:
             self.checkpoints.pop(0)
 
-    def update_greedy_schedule(self, win_rate: float):
+    def update_mastery(self, win_rate_greedy: float, win_rate_smart: float):
         """
-        Update the greedy schedule stage based on win rate against greedy.
-        Schedule only advances forward (never regresses).
+        Update mastery levels using EMA (Exponential Moving Average) of win rates.
+        This provides stability against noisy evaluations.
 
-        Stage 0: win_rate < 0.20 → heavy random/greedy mix (easy)
-        Stage 1: 0.20 ≤ win_rate < 0.30 → add a bit of smart/self-play
-        Stage 2: win_rate ≥ 0.30 → more self-play and smart, less random
+        Args:
+            win_rate_greedy: Current win rate against greedy opponents
+            win_rate_smart: Current win rate against smart opponents
         """
-        if win_rate >= 0.40 and self.greedy_schedule_stage < 3:
-            self.greedy_schedule_stage = 3
-        if win_rate >= 0.35 and self.greedy_schedule_stage < 2:
-            self.greedy_schedule_stage = 2
-        elif win_rate >= 0.2 and self.greedy_schedule_stage < 1:
-            self.greedy_schedule_stage = 1
+        # Update EMA win rates
+        if self.ema_win_rate_greedy is None:
+            self.ema_win_rate_greedy = win_rate_greedy
+        else:
+            self.ema_win_rate_greedy = (
+                self.ema_alpha * win_rate_greedy + (1 - self.ema_alpha) * self.ema_win_rate_greedy
+            )
 
-    def sample_opponent_policy(self, current_policy: MLPPolicy) -> MLPPolicy | Callable:
+        if self.ema_win_rate_smart is None:
+            self.ema_win_rate_smart = win_rate_smart
+        else:
+            self.ema_win_rate_smart = self.ema_alpha * win_rate_smart + (1 - self.ema_alpha) * self.ema_win_rate_smart
+
+        # Compute mastery scores (clipped to [0, 1])
+        self.mastery_greedy = min(1.0, max(0.0, self.ema_win_rate_greedy / self.GREEDY_MASTERY_TARGET))
+        self.mastery_smart = min(1.0, max(0.0, self.ema_win_rate_smart / self.SMART_MASTERY_TARGET))
+
+    def compute_dynamic_opponent_mix(self) -> OpponentMix:
         """
-        Sample an opponent policy/strategy based on the current greedy schedule stage.
+        Compute opponent mix dynamically based on mastery levels.
+        Implements a three-phase curriculum:
+        1. Phase 1: Learning to beat greedy (mastery_greedy < 1.0)
+        2. Phase 2: Learning to beat smart (mastery_greedy >= 1.0, mastery_smart < 1.0)
+        3. Phase 3: Self-play focus (both mastered)
+
+        Retention weights ensure we don't forget previously mastered opponents.
+        """
+        # Base weights for different phases
+        if self.mastery_greedy < 1.0:
+            # Phase 1: Focus on learning greedy
+            greedy_weight = 0.50 + 0.10 * (1.0 - self.mastery_greedy)  # 50-60% when learning
+            smart_weight = 0.15 + 0.05 * self.mastery_greedy  # 15-20% gradually increasing
+            current_weight = 0.15 + 0.05 * self.mastery_greedy  # 15-20% gradually increasing
+            checkpoint_weight = 0.05 * self.mastery_greedy  # 0-5% gradually increasing
+            random_weight = 0.10 - 0.05 * self.mastery_greedy  # 10-5% gradually decreasing
+        elif self.mastery_smart < 1.0:
+            # Phase 2: Focus on learning smart, retain greedy
+            greedy_weight = self.GREEDY_RETENTION_FRACTION
+            smart_weight = 0.45 + 0.05 * (1.0 - self.mastery_smart)  # 45-50% when learning
+            current_weight = 0.25 + 0.05 * self.mastery_smart  # 25-30% gradually increasing
+            checkpoint_weight = 0.10 + 0.05 * self.mastery_smart  # 10-15% gradually increasing
+            random_weight = 0.05
+        else:
+            # Phase 3: Both mastered, focus on self-play
+            greedy_weight = self.GREEDY_RETENTION_FRACTION
+            smart_weight = self.SMART_RETENTION_FRACTION
+            # Remaining weight for self-play (current + checkpoint) and random
+            remaining_weight = 1.0 - greedy_weight - smart_weight - 0.05  # Reserve 5% for random
+            current_weight = remaining_weight * 0.75  # 75% of remaining to current policy
+            checkpoint_weight = remaining_weight * 0.25  # 25% of remaining to checkpoints
+            random_weight = 0.05
+
+        return OpponentMix(
+            greedy_weight=greedy_weight,
+            smart_weight=smart_weight,
+            current_weight=current_weight,
+            checkpoint_weight=checkpoint_weight,
+            random_weight=random_weight,
+        )
+
+    def sample_opponent_policy(self, current_policy: nn.Module) -> nn.Module | Callable:
+        """
+        Sample an opponent policy/strategy based on dynamic mastery-weighted curriculum.
         Returns either a policy or a callable strategy function.
 
-        The stage determines the opponent mix:
-        - Stage 0 (<20% win rate): More greedy/smart to learn basics
-        - Stage 1 (20-30% win rate): Balanced mix with more self-play
-        - Stage 2 (≥30% win rate): Heavy self-play with occasional baselines
-        - Stage 3 (≥40% win rate): More self-play and smart, less random
+        The opponent mix is computed dynamically based on mastery levels:
+        - Phase 1: Learning greedy (50-60% greedy, 15-20% smart/self-play)
+        - Phase 2: Learning smart while retaining greedy (15-20% greedy retention, 45-50% smart)
+        - Phase 3: Self-play focus with retention (10-15% greedy, 15-20% smart, 55-65% self-play)
         """
-        # Select the appropriate opponent mix based on stage
-        opponent_mix = [self.STAGE_0, self.STAGE_1, self.STAGE_2, self.STAGE_3][self.greedy_schedule_stage]
+        # Compute dynamic opponent mix based on current mastery levels
+        opponent_mix = self.compute_dynamic_opponent_mix()
         weights, strategies = opponent_mix.get_weights_and_strategies()
 
         # Sample strategy type using weighted random choice
@@ -432,8 +489,8 @@ class CheckpointManager:
             return current_policy
         elif chosen_strategy == "checkpoint":
             if len(self.checkpoints) > 0:
-                # Sample from last 5 checkpoints
-                _, checkpoint_policy = random.choice(self.checkpoints[-10:])
+                # Sample from recent checkpoints (last 10)
+                _, checkpoint_policy = random.choice(self.checkpoints[-20:])
                 return checkpoint_policy
             else:
                 # Fallback to random if no checkpoints available
@@ -481,6 +538,7 @@ def plot_training_curves(
     max_logprob_history=None,
     eval_episodes=None,
     win_rates=None,
+    win_rates_smart=None,
     save_path="training_curves.png",
 ):
     """Plot training curves and save to file."""
@@ -553,12 +611,24 @@ def plot_training_curves(
 
     # Win Rate (if available)
     if eval_episodes and win_rates and len(axes) > 5:
-        axes[5].plot(eval_episodes, win_rates, linewidth=2.5, color="#C9184A", marker="o", markersize=6)
+        axes[5].plot(
+            eval_episodes, win_rates, linewidth=2.5, color="#C9184A", marker="o", markersize=6, label="vs Greedy"
+        )
+        if win_rates_smart:
+            axes[5].plot(
+                eval_episodes,
+                win_rates_smart,
+                linewidth=2.5,
+                color="#4A90E2",
+                marker="s",
+                markersize=6,
+                label="vs Smart",
+            )
         axes[5].axhline(y=0.25, color="gray", linestyle="--", linewidth=1, alpha=0.5, label="Expected Random (25%)")
         axes[5].set_xlabel("Episode", fontsize=11)
         axes[5].set_ylabel("Win Rate", fontsize=11)
         axes[5].set_title(
-            "Win Rate vs Greedy Policy\n(Current policy as Player 0 vs greedy opponents)",
+            "Win Rate vs Opponents\n(Current policy as Player 0)",
             fontsize=12,
             fontweight="bold",
         )
@@ -576,7 +646,7 @@ def plot_training_curves(
 
 
 def value_of_starting_hand(
-    policy: MLPPolicy, hand: list[int], n_players: int = 4, sims: int = 512, device="cpu"
+    policy: nn.Module, hand: list[int], n_players: int = 4, sims: int = 512, device="cpu"
 ) -> float:
     # Monte Carlo rollouts with frozen policy; returns expected terminal reward for seat 0 with given starting hand
     wins = 0.0

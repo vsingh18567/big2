@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import nn, optim
 from tqdm import tqdm
 
-from big2.nn import MLPPolicy, combo_to_action_vector
+from big2.nn import combo_to_action_vector, make_policy
 from big2.simulator.cards import PASS, Combo, card_name
 from big2.simulator.env import Big2Env
 from big2.simulator.greedy_strategy import greedy_strategy
@@ -40,9 +40,9 @@ class PPOStepRecord:
 
 def collect_ppo_trajectories(
     env: Big2Env,
-    policy: MLPPolicy,
+    policy: nn.Module,
     episodes_per_batch: int,
-    opponent_strategies_by_episode: list[dict[int, MLPPolicy | Callable]],
+    opponent_strategies_by_episode: list[dict[int, nn.Module | Callable]],
     model_seats: list[int],
     device: str,
 ) -> dict[int, list[PPOStepRecord]]:
@@ -72,7 +72,7 @@ def collect_ppo_trajectories(
             if p != model_seat:
                 # Opponent player: use provided strategy
                 strategy = opponent_strategies.get(p, greedy_strategy)
-                if isinstance(strategy, MLPPolicy):
+                if isinstance(strategy, nn.Module):
                     action = select_action_greedy(strategy, state, candidates)
                 elif strategy == smart_strategy:
                     # Smart strategy needs hand and trick_pile
@@ -131,9 +131,9 @@ def collect_ppo_trajectories(
 
 def collect_ppo_trajectories_batched(
     n_players: int,
-    policy: MLPPolicy,
+    policy: nn.Module,
     episodes_per_batch: int,
-    opponent_strategies_by_env: list[dict[int, MLPPolicy | Callable]],
+    opponent_strategies_by_env: list[dict[int, nn.Module | Callable]],
     model_seats: list[int],
     device: str,
 ) -> dict[int, list[PPOStepRecord]]:
@@ -232,7 +232,7 @@ def collect_ppo_trajectories_batched(
         for env_idx, env, p, candidates in env_info:
             if env_idx not in env_actions:  # Not already processed as model player
                 strategy = opponent_strategies_by_env[env_idx].get(p, greedy_strategy)
-                if isinstance(strategy, MLPPolicy):
+                if isinstance(strategy, nn.Module):
                     action = select_action_greedy(strategy, states[env_idx], candidates)
                 elif strategy == smart_strategy:
                     action = strategy(candidates, env.hands[p], env.trick_pile)
@@ -273,7 +273,7 @@ def collect_ppo_trajectories_batched(
 
 
 def ppo_update(
-    policy: MLPPolicy,
+    policy: nn.Module,
     trajectories: dict[int, list[PPOStepRecord]],
     optimizer: optim.Optimizer,
     ppo_epochs: int,
@@ -478,7 +478,7 @@ def train_ppo(
     lr=3e-4,
     entropy_beta=0.01,
     value_coef=0.5,
-    gamma=0.999,
+    gamma=0.99,
     lam=0.95,
     seed=42,
     device="cpu",
@@ -486,6 +486,7 @@ def train_ppo(
     eval_games=500,
     mini_batch_size=None,
     use_batched_collection=True,
+    policy_arch: str = "mlp",
 ):
     """
     Train using Proximal Policy Optimization (PPO).
@@ -517,13 +518,15 @@ def train_ppo(
     print("Training across seats: enabled (one model-controlled seat per environment, rotated each batch)")
     print("Opponent diversity within batch: enabled (opponents sampled per-environment/per-seat)")
     print(f"PPO parameters: epochs={ppo_epochs}, clip_epsilon={clip_epsilon}")
+    print(f"Policy architecture: {policy_arch}")
     print(
-        "Opponent mixture: Adaptive based on win rate schedule "
-        "(Stage 0: 20% greedy/35% smart, Stage 1: 10% greedy/25% smart, Stage 2: 5% greedy/20% smart)"
+        "Opponent mixture: Mastery-based curriculum learning "
+        "(Phase 1: Learn greedy 50-60%, Phase 2: Learn smart 45-50% with greedy retention, "
+        "Phase 3: Self-play 55-65% with retention of mastered opponents)"
     )
 
     env = Big2Env(n_players)
-    policy = MLPPolicy(n_players=n_players, device=device).to(device)
+    policy = make_policy(policy_arch, n_players=n_players, device=device).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=lr)
 
     # Checkpoint manager for opponent sampling
@@ -533,7 +536,7 @@ def train_ppo(
     warmup_batches = batches // 10  # 10% warmup
 
     def lr_lambda(current_batch):
-        min_lr_ratio = 0.5  # LR won't drop below 50% of initial
+        min_lr_ratio = 0.1  # LR won't drop below 50% of initial
         if current_batch < warmup_batches:
             # Linear warmup
             return current_batch / warmup_batches
@@ -548,7 +551,7 @@ def train_ppo(
     # Adaptive entropy coefficient
     current_entropy_beta = entropy_beta
     target_entropy_start = 0.8  # Target entropy level
-    target_entropy_end = 0.5
+    target_entropy_end = 0.45
     entropy_beta_min = 0.05
     entropy_beta_max = 0.2
 
@@ -561,6 +564,7 @@ def train_ppo(
     # Track evaluation metrics
     eval_episodes = []
     win_rates = []
+    win_rates_smart = []
 
     for batch in tqdm(range(1, batches + 1)):
         # Collect trajectories
@@ -570,10 +574,10 @@ def train_ppo(
         model_seats = [int(base_seats[i]) for i in perm]
         frac = batch / batches
         target_entropy = target_entropy_start + (target_entropy_end - target_entropy_start) * frac
-        opponent_strategies_by_env: list[dict[int, MLPPolicy | Callable]] = []
+        opponent_strategies_by_env: list[dict[int, nn.Module | Callable]] = []
         for env_idx in range(episodes_per_batch):
             model_seat = model_seats[env_idx]
-            opp_map: dict[int, MLPPolicy | Callable] = {}
+            opp_map: dict[int, nn.Module | Callable] = {}
             for p in all_players:
                 if p == model_seat:
                     continue
@@ -634,9 +638,10 @@ def train_ppo(
 
             eval_episodes.append(batch)
             win_rates.append(metrics.win_rate_vs_greedy)
+            win_rates_smart.append(metrics.win_rate_vs_smart)
 
-            # Update greedy schedule based on win rate
-            checkpoint_manager.update_greedy_schedule(metrics.win_rate_vs_greedy)
+            # Update mastery levels based on win rates against greedy and smart
+            checkpoint_manager.update_mastery(metrics.win_rate_vs_greedy, metrics.win_rate_vs_smart)
 
             print(f"[Step {batch}] Evaluation Results ({metrics.total_games} games):")
             wins_vs_greedy = int(metrics.win_rate_vs_greedy * metrics.total_games)
@@ -660,8 +665,17 @@ def train_ppo(
             )
             print(f"[Step {batch}] lr={current_lr:.6f} ent_beta={current_entropy_beta:.4f}")
             n_checkpoints = len(checkpoint_manager.checkpoints)
-            stage = checkpoint_manager.greedy_schedule_stage
-            print(f"[Step {batch}] Checkpoints in pool: {n_checkpoints}, Greedy schedule stage: {stage}\n")
+            ema_greedy = (
+                checkpoint_manager.ema_win_rate_greedy if checkpoint_manager.ema_win_rate_greedy is not None else 0.0
+            )
+            ema_smart = (
+                checkpoint_manager.ema_win_rate_smart if checkpoint_manager.ema_win_rate_smart is not None else 0.0
+            )
+            print(
+                f"[Step {batch}] Checkpoints in pool: {n_checkpoints}, "
+                f"Opponent mix: {checkpoint_manager.compute_dynamic_opponent_mix()}, "
+                f"EMA win rates (greedy: {ema_greedy:.2%}, smart: {ema_smart:.2%})\n"
+            )
 
             # Save checkpoint and add to manager
             save_path = f"big2_model_step_{batch}.pt"
@@ -678,10 +692,16 @@ def train_ppo(
         entropy_history,
         eval_episodes,
         win_rates,
+        win_rates_smart,
     )
 
 
 if __name__ == "__main__":
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+    print(torch.get_num_threads())  # should be 1
+    print(torch.get_num_interop_threads())  # should be 1
+
     if torch.cuda.is_available():
         device = "cuda"
     else:
@@ -698,22 +718,24 @@ if __name__ == "__main__":
         entropy_history,
         eval_episodes,
         win_rates,
+        win_rates_smart,
     ) = train_ppo(
         n_players=n_players,
-        batches=500,
+        batches=5000,
         episodes_per_batch=64,
-        ppo_epochs=3,
+        ppo_epochs=2,
         clip_epsilon=0.2,
-        lr=3e-4,
+        lr=1e-3,
         entropy_beta=0.05,
         value_coef=0.5,
-        gamma=0.999,
+        gamma=0.99,
         lam=0.95,
         seed=42,
         device=device,
-        eval_interval=25,
-        eval_games=400,
+        eval_interval=50,
+        eval_games=500,
         mini_batch_size=256,
+        policy_arch="setpool",
     )
 
     hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
@@ -740,4 +762,5 @@ if __name__ == "__main__":
         None,  # max_logprob_history not tracked in PPO
         eval_episodes,
         win_rates,
+        win_rates_smart,
     )

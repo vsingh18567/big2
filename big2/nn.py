@@ -91,6 +91,37 @@ def combo_to_action_vector(cmb: Combo) -> np.ndarray:
     return vec
 
 
+def _pool_card_embeddings(emb: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """
+    Mean-pool card embeddings with a boolean mask.
+
+    Args:
+        emb: (B, N, E)
+        mask: (B, N) True for valid tokens
+    """
+    mask_f = mask.to(dtype=emb.dtype).unsqueeze(-1)  # (B,N,1)
+    summed = (emb * mask_f).sum(dim=1)  # (B,E)
+    denom = mask_f.sum(dim=1).clamp_min(1.0)  # (B,1)
+    return summed / denom
+
+
+def make_policy(arch: str, *, n_players: int = 4, device: str = "cpu") -> nn.Module:
+    """
+    Factory for policy networks.
+
+    Keeping a central factory lets training/eval code swap architectures without
+    sprinkling class names everywhere (important for checkpoint opponents).
+    """
+    arch_norm = arch.lower().strip()
+    if arch_norm in {"mlp", "mlppolicy"}:
+        print("Using MLPPolicy")
+        return MLPPolicy(n_players=n_players, device=device)
+    if arch_norm in {"setpool", "set_pool", "pooled"}:
+        print("Using SetPoolPolicy")
+        return SetPoolPolicy(n_players=n_players, device=device)
+    raise ValueError(f"Unknown policy arch: {arch!r}. Expected one of: mlp, setpool")
+
+
 class MLPPolicy(nn.Module):
     def __init__(
         self, n_players: int = 4, card_vocab=53, card_emb_dim=32, hidden=1024, action_hidden=256, device="cpu"
@@ -189,6 +220,158 @@ class MLPPolicy(nn.Module):
         logits = self.policy_head(joint).squeeze(-1)  # (sumA,)
         # Split logits per batch element
         split_logits = []
+        idx = 0
+        for c in counts:
+            split_logits.append(logits[idx : idx + c])
+            idx += c
+        values = self.value_head(state_h).squeeze(-1)  # (B,)
+        return split_logits, values
+
+
+class SetPoolPolicy(nn.Module):
+    """
+    A stronger, more inductive-bias-friendly alternative to MLPPolicy:
+    - Own hand is encoded via masked mean-pooling over card embeddings (order-invariant).
+    - last_play / seen / opponent_cards are encoded via the same card embedding table, pooled from 52-d one-hot.
+    - Policy head uses a dot-product scorer between state and action embeddings (cheap, expressive, stable).
+    """
+
+    def __init__(
+        self,
+        n_players: int = 4,
+        card_vocab: int = 53,
+        card_emb_dim: int = 64,
+        hidden: int = 768,
+        action_hidden: int = 256,
+        device: str = "cpu",
+    ):
+        super().__init__()
+        self.device = device
+        self.n_players = n_players
+        self.cards_per_player = 52 // n_players
+        self.pad_id = 52  # for -1
+
+        # Shared card embedding. Index 0..51 are real cards; 52 is pad.
+        self.card_emb = nn.Embedding(card_vocab, card_emb_dim)
+
+        # Encoders
+        self.hand_enc = nn.Sequential(nn.Linear(card_emb_dim, hidden), nn.GELU(), nn.Dropout(DROPOUT_RATE))
+        self.set52_enc = nn.Sequential(nn.Linear(card_emb_dim, hidden), nn.GELU(), nn.Dropout(DROPOUT_RATE))
+        self.counts_enc = nn.Sequential(nn.Linear(n_players - 1, hidden), nn.GELU(), nn.Dropout(DROPOUT_RATE))
+        self.passes_enc = nn.Sequential(nn.Linear(1, hidden), nn.GELU(), nn.Dropout(DROPOUT_RATE))
+
+        # Opponents: encode each opponent's revealed cards separately, then keep seat-order.
+        self.opp_enc = nn.Sequential(nn.Linear(card_emb_dim, hidden), nn.GELU(), nn.Dropout(DROPOUT_RATE))
+
+        # State trunk
+        state_in = hidden * (1 + 1 + 1 + 1 + (n_players - 1))  # hand, last_play, seen, passes, opponents
+        state_in += hidden  # counts
+        self.state_proj = nn.Linear(state_in, hidden)
+        self.state_ln = nn.LayerNorm(hidden)
+        self.state_ff = nn.Sequential(
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Dropout(DROPOUT_RATE),
+            nn.Linear(hidden, hidden),
+            nn.Dropout(DROPOUT_RATE),
+        )
+
+        # Action encoder (same feature vector as before)
+        self.action_enc = nn.Sequential(
+            nn.Linear(ACTION_VECTOR_DIM, action_hidden),
+            nn.GELU(),
+            nn.Dropout(DROPOUT_RATE),
+            nn.Linear(action_hidden, action_hidden),
+            nn.GELU(),
+            nn.Dropout(DROPOUT_RATE),
+        )
+
+        # Dot-product policy scorer
+        self.state_to_action = nn.Linear(hidden, action_hidden)
+
+        # Value head
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden // 2),
+            nn.GELU(),
+            nn.Linear(hidden // 2, 1),
+        )
+
+    def _encode_onehot52(self, x52: torch.Tensor) -> torch.Tensor:
+        # x52: (B,52) float/bool
+        # pool via sum of embeddings: (B,52) @ (52,E) -> (B,E)
+        w = self.card_emb.weight[:52]  # (52,E)
+        return x52.to(dtype=w.dtype) @ w
+
+    def forward_state(self, state_tensor: torch.Tensor) -> torch.Tensor:
+        B = state_tensor.shape[0]
+
+        hand_ids = state_tensor[:, : self.cards_per_player].clone()
+        last_play = state_tensor[:, self.cards_per_player : self.cards_per_player + 52].float()
+        seen = state_tensor[:, self.cards_per_player + 52 : self.cards_per_player + 104].float()
+        counts_start = self.cards_per_player + 104
+        counts_end = counts_start + (self.n_players - 1)
+        counts = state_tensor[:, counts_start:counts_end].float()
+        passes_start = counts_end
+        passes_end = passes_start + 1
+        passes = state_tensor[:, passes_start:passes_end].float()
+        opponent_cards = state_tensor[:, passes_end:].float()
+
+        # Hand: masked mean-pool over card embeddings (order-invariant)
+        hand_ids[hand_ids < 0] = self.pad_id
+        hand_mask = hand_ids != self.pad_id
+        hand_emb = self.card_emb(hand_ids.long())  # (B,N,E)
+        hand_pool = _pool_card_embeddings(hand_emb, hand_mask)  # (B,E)
+        hand_h = self.hand_enc(hand_pool)  # (B,H)
+
+        # Sets: last_play / seen / opp_cards use pooled 52-d one-hot
+        lp_pool = self._encode_onehot52(last_play)
+        sn_pool = self._encode_onehot52(seen)
+        lp_h = self.set52_enc(lp_pool)
+        sn_h = self.set52_enc(sn_pool)
+
+        # Opponent cards: (B,(n-1)*52) -> (B,n-1,52) -> pooled -> (B,n-1,H) -> flatten
+        if opponent_cards.numel() == 0:
+            opp_flat = torch.zeros((B, 0), device=state_tensor.device, dtype=hand_h.dtype)
+        else:
+            opp = opponent_cards.view(B, self.n_players - 1, 52)
+            opp_pool = torch.einsum("bnc,ce->bne", opp, self.card_emb.weight[:52])  # (B,n-1,E)
+            opp_h = self.opp_enc(opp_pool)  # (B,n-1,H)
+            opp_flat = opp_h.reshape(B, -1)  # keep seat order
+
+        ct_h = self.counts_enc(counts)
+        ps_h = self.passes_enc(passes)
+
+        x = torch.cat([hand_h, lp_h, sn_h, ps_h, opp_flat, ct_h], dim=-1)
+        h = self.state_ln(F.gelu(self.state_proj(x)))
+        h = h + self.state_ff(h)
+        h = self.state_ln(h)
+        return h
+
+    def encode_actions(self, actions_batch: list[list[np.ndarray]]) -> torch.Tensor:
+        all_feats = []
+        for acts in actions_batch:
+            for feat_vec in acts:
+                all_feats.append(torch.from_numpy(feat_vec.astype(np.float32)))
+        feats = torch.stack(all_feats, dim=0)
+        return feats.to(self.device)
+
+    def forward(self, state_tensor: torch.Tensor, actions_batch: list[list[np.ndarray]]):
+        B = state_tensor.shape[0]
+        state_h = self.forward_state(state_tensor)  # (B,H)
+
+        counts = [len(a) if len(a) > 0 else 1 for a in actions_batch]
+        feats = self.encode_actions(actions_batch)  # (sumA,80)
+        aenc = self.action_enc(feats)  # (sumA,A)
+
+        sproj = self.state_to_action(state_h)  # (B,A)
+        tiled = torch.cat([sproj[i].unsqueeze(0).repeat(counts[i], 1) for i in range(B)], dim=0)
+
+        # Dot-product scorer (scaled)
+        logits = (tiled * aenc).sum(dim=-1) / (aenc.shape[-1] ** 0.5)  # (sumA,)
+
+        split_logits: list[torch.Tensor] = []
         idx = 0
         for c in counts:
             split_logits.append(logits[idx : idx + c])

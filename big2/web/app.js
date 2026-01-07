@@ -265,34 +265,52 @@ function updateBotSuggestion(botSuggestion, isHumanTurn) {
         return;
     }
 
-    if (!botSuggestion) {
+    if (!botSuggestion || !Array.isArray(botSuggestion) || botSuggestion.length === 0) {
         suggestionContainer.innerHTML = '<p class="no-suggestion">Unable to calculate bot suggestion</p>';
         return;
     }
 
-    // Display the bot's suggested move
+    // Display the top moves with probabilities
     let suggestionHtml = `<div class="bot-suggestion-content">`;
-    suggestionHtml += `<div class="bot-suggestion-text"><strong>Bot would play:</strong> ${botSuggestion.display}</div>`;
 
-    // If the suggestion has cards, show them visually
-    if (botSuggestion.cards && botSuggestion.cards.length > 0) {
-        const cardsHtml = botSuggestion.cards
-            .map((cardId) => {
-                const rank = RANKS[Math.floor(cardId / 4)];
-                const suit = SUITS[cardId % 4];
-                const isRed = suit === "♥" || suit === "♦";
-                const suitClass = isRed ? "suit-red" : "suit-black";
-                return `
-                    <div class="card small-card ${suitClass}">
-                        <div class="card-rank ${suitClass}">${rank}</div>
-                        <div class="card-suit ${suitClass}">${suit}</div>
-                        <div class="card-rank-bottom ${suitClass}">${rank}</div>
-                    </div>
-                `;
-            })
-            .join("");
-        suggestionHtml += `<div class="bot-suggestion-cards">${cardsHtml}</div>`;
-    }
+    botSuggestion.forEach((move, index) => {
+        const isTopMove = index === 0;
+        const rankLabel = index === 0 ? "🥇" : index === 1 ? "🥈" : "🥉";
+
+        suggestionHtml += `<div class="bot-move-item ${isTopMove ? "top-move" : ""}">`;
+        suggestionHtml += `<div class="bot-move-header">`;
+        suggestionHtml += `<span class="bot-move-rank">${rankLabel}</span>`;
+        suggestionHtml += `<span class="bot-move-display">${move.display}</span>`;
+        suggestionHtml += `<span class="bot-move-probability">${move.probability_pct}%</span>`;
+        suggestionHtml += `</div>`;
+
+        // Probability bar
+        suggestionHtml += `<div class="probability-bar-container">`;
+        suggestionHtml += `<div class="probability-bar" style="width: ${move.probability_pct}%"></div>`;
+        suggestionHtml += `</div>`;
+
+        // If the move has cards, show them visually (only for top move to save space)
+        if (isTopMove && move.cards && move.cards.length > 0) {
+            const cardsHtml = move.cards
+                .map((cardId) => {
+                    const rank = RANKS[Math.floor(cardId / 4)];
+                    const suit = SUITS[cardId % 4];
+                    const isRed = suit === "♥" || suit === "♦";
+                    const suitClass = isRed ? "suit-red" : "suit-black";
+                    return `
+                        <div class="card small-card ${suitClass}">
+                            <div class="card-rank ${suitClass}">${rank}</div>
+                            <div class="card-suit ${suitClass}">${suit}</div>
+                            <div class="card-rank-bottom ${suitClass}">${rank}</div>
+                        </div>
+                    `;
+                })
+                .join("");
+            suggestionHtml += `<div class="bot-suggestion-cards">${cardsHtml}</div>`;
+        }
+
+        suggestionHtml += `</div>`;
+    });
 
     suggestionHtml += `</div>`;
     suggestionContainer.innerHTML = suggestionHtml;

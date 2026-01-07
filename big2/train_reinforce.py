@@ -86,6 +86,7 @@ def train_selfplay(
     # Track evaluation metrics
     eval_episodes = []
     win_rates = []
+    win_rates_smart = []
 
     for batch in tqdm(range(1, batches + 1)):
         batch_logp, batch_val, batch_ret, batch_adv, batch_ent, batch_max_logp = [], [], [], [], [], []
@@ -172,9 +173,10 @@ def train_selfplay(
 
             eval_episodes.append(batch)
             win_rates.append(metrics.win_rate_vs_greedy)
+            win_rates_smart.append(metrics.win_rate_vs_smart)
 
-            # Update greedy schedule based on win rate
-            checkpoint_manager.update_greedy_schedule(metrics.win_rate_vs_greedy)
+            # Update mastery levels based on win rates against greedy and smart
+            checkpoint_manager.update_mastery(metrics.win_rate_vs_greedy, metrics.win_rate_vs_smart)
 
             print(f"[Step {batch}] Evaluation Results ({metrics.total_games} games):")
             wins_vs_greedy = int(metrics.win_rate_vs_greedy * metrics.total_games)
@@ -194,11 +196,18 @@ def train_selfplay(
             )
             print(f"[Step {batch}] lr={current_lr:.6f} ent_beta={current_entropy_beta:.4f}")
             n_checkpoints = len(checkpoint_manager.checkpoints)
-            stage = checkpoint_manager.greedy_schedule_stage
-            greedy_pct = {0: "50%", 1: "25%", 2: "15%"}[stage]
+            mastery_greedy = checkpoint_manager.mastery_greedy
+            mastery_smart = checkpoint_manager.mastery_smart
+            ema_greedy = (
+                checkpoint_manager.ema_win_rate_greedy if checkpoint_manager.ema_win_rate_greedy is not None else 0.0
+            )
+            ema_smart = (
+                checkpoint_manager.ema_win_rate_smart if checkpoint_manager.ema_win_rate_smart is not None else 0.0
+            )
             print(
                 f"[Step {batch}] Checkpoints in pool: {n_checkpoints}, "
-                f"Greedy schedule stage: {stage} ({greedy_pct} greedy)\n"
+                f"Mastery (greedy: {mastery_greedy:.2f}, smart: {mastery_smart:.2f}), "
+                f"EMA win rates (greedy: {ema_greedy:.2%}, smart: {ema_smart:.2%})\n"
             )
 
             # Save checkpoint and add to manager
@@ -217,6 +226,7 @@ def train_selfplay(
         max_logprob_history,
         eval_episodes,
         win_rates,
+        win_rates_smart,
     )
 
 
@@ -238,6 +248,7 @@ if __name__ == "__main__":
         max_logprob_history,
         eval_episodes,
         win_rates,
+        win_rates_smart,
     ) = train_selfplay(
         n_players=n_players,
         batches=500,
@@ -276,4 +287,5 @@ if __name__ == "__main__":
         max_logprob_history,
         eval_episodes,
         win_rates,
+        win_rates_smart,
     )
