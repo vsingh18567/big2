@@ -33,8 +33,8 @@ class SetPoolPolicyConfig:
     n_players: int = 4
     card_vocab: int = 53
     card_emb_dim: int = 64
-    hidden: int = 768
-    action_hidden: int = 256
+    hidden: int = 1536
+    action_hidden: int = 384
     device: str = "cpu"
 
 
