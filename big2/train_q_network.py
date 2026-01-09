@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import nn, optim
 from tqdm import tqdm
 
-from big2.nn import MLPQNetwork, combo_to_action_vector
+from big2.nn import SetPoolQNetwork, combo_to_action_vector
 from big2.simulator.cards import PASS, Combo, card_name
 from big2.simulator.env import Big2Env
 from big2.simulator.greedy_strategy import greedy_strategy
@@ -28,7 +28,7 @@ class QStepRecord:
     done: bool = False
 
 
-def select_action_q_greedy(qnet: MLPQNetwork, state: np.ndarray, candidates: list[Combo]) -> Combo:
+def select_action_q_greedy(qnet: SetPoolQNetwork, state: np.ndarray, candidates: list[Combo]) -> Combo:
     """Select action greedily (argmax Q) for evaluation/opponents."""
     with torch.no_grad():
         st = torch.from_numpy(state[np.newaxis, :]).long().to(qnet.device)
@@ -40,7 +40,7 @@ def select_action_q_greedy(qnet: MLPQNetwork, state: np.ndarray, candidates: lis
 
 
 def select_action_q_epsilon_greedy(
-    qnet: MLPQNetwork, state: np.ndarray, candidates: list[Combo], epsilon: float
+    qnet: SetPoolQNetwork, state: np.ndarray, candidates: list[Combo], epsilon: float
 ) -> tuple[Combo, int]:
     """Epsilon-greedy w.r.t. argmax Q."""
     if len(candidates) == 0:
@@ -58,7 +58,7 @@ def select_action_q_epsilon_greedy(
 
 
 def play_evaluation_game_q(
-    current_qnet: MLPQNetwork,
+    current_qnet: SetPoolQNetwork,
     n_players: int,
     opponent_strategy: Callable[[list[Combo]], Combo] = greedy_strategy,
     epsilon: float = 0.0,
@@ -94,7 +94,7 @@ def play_evaluation_game_q(
     return env.winner, starting_position, cards_remaining
 
 
-def evaluate_against_greedy_q(current_qnet: MLPQNetwork, n_players: int, num_games: int = 500, device: str = "cpu"):
+def evaluate_against_greedy_q(current_qnet: SetPoolQNetwork, n_players: int, num_games: int = 500, device: str = "cpu"):
     """Lightweight evaluation (matches logging needs for checkpoint schedule)."""
     wins_vs_greedy = 0
     wins_vs_random = 0
@@ -182,12 +182,12 @@ class QCheckpointManager:
     def __init__(self, device: str = "cpu", n_players: int = 4):
         self.device = device
         self.n_players = n_players
-        self.checkpoints: list[tuple[int, MLPQNetwork]] = []
+        self.checkpoints: list[tuple[int, SetPoolQNetwork]] = []
         self.max_checkpoints = 20
         self.greedy_schedule_stage = 0
 
-    def add_checkpoint(self, step: int, qnet: MLPQNetwork):
-        checkpoint_qnet = MLPQNetwork(n_players=self.n_players, device=self.device).to(self.device)
+    def add_checkpoint(self, step: int, qnet: SetPoolQNetwork):
+        checkpoint_qnet = SetPoolQNetwork(n_players=self.n_players, device=self.device).to(self.device)
         checkpoint_qnet.load_state_dict(qnet.state_dict())
         checkpoint_qnet.eval()
         self.checkpoints.append((step, checkpoint_qnet))
@@ -202,7 +202,7 @@ class QCheckpointManager:
         elif win_rate >= 0.2 and self.greedy_schedule_stage < 1:
             self.greedy_schedule_stage = 1
 
-    def sample_opponent_strategy(self, current_qnet: MLPQNetwork) -> MLPQNetwork | Callable:
+    def sample_opponent_strategy(self, current_qnet: SetPoolQNetwork) -> SetPoolQNetwork | Callable:
         opponent_mix = [self.STAGE_0, self.STAGE_1, self.STAGE_2, self.STAGE_3][self.greedy_schedule_stage]
         weights, strategies = opponent_mix.get_weights_and_strategies()
         chosen = np.random.choice(strategies, p=weights)
@@ -222,9 +222,9 @@ class QCheckpointManager:
 
 def collect_q_trajectories(
     n_players: int,
-    qnet: MLPQNetwork,
+    qnet: SetPoolQNetwork,
     episodes_per_batch: int,
-    opponent_strategies_by_episode: list[dict[int, MLPQNetwork | Callable]],
+    opponent_strategies_by_episode: list[dict[int, SetPoolQNetwork | Callable]],
     model_seats: list[int],
     epsilon: float,
     step_penalty: float,
@@ -246,7 +246,7 @@ def collect_q_trajectories(
 
             if p != model_seat:
                 strategy = opponent_strategies.get(p, greedy_strategy)
-                if isinstance(strategy, MLPQNetwork):
+                if isinstance(strategy, SetPoolQNetwork):
                     action = select_action_q_greedy(strategy, state, candidates)
                 elif strategy == smart_strategy:
                     action = strategy(candidates, env.hands[p], env.trick_pile)
@@ -281,15 +281,13 @@ def collect_q_trajectories(
     return trajectories
 
 
-def q_learning_update(
-    qnet: MLPQNetwork,
-    qnet_target: MLPQNetwork,
+def sarsa_1step_update(
+    qnet: SetPoolQNetwork,
+    qnet_target: SetPoolQNetwork,
     trajectories: dict[int, list[QStepRecord]],
     optimizer: optim.Optimizer,
     gamma: float,
     device: str,
-    *,
-    use_double_q: bool = True,
 ) -> float:
     # Split into episodes using done flags
     episodes: list[list[QStepRecord]] = []
@@ -315,35 +313,32 @@ def q_learning_update(
             actions_batch.append([combo_to_action_vector(c) for c in r.candidates])
             chosen_indices.append(r.action_idx)
 
-    # Compute bootstrap values for all non-terminal steps.
+    # Compute bootstrap values for all non-terminal steps (1-step SARSA).
     # Since our "time steps" are model-decision points, s_{t+1} is the next time
-    # the model acts (after opponents have taken their turns).
+    # the model acts (after opponents have taken their turns), and a_{t+1} is the
+    # action actually taken there by the behavior policy (epsilon-greedy).
     next_states: list[np.ndarray] = []
     next_actions_batch: list[list[np.ndarray]] = []
+    next_chosen_indices: list[int] = []
     for ep in episodes:
         for t in range(len(ep) - 1):
             nxt = ep[t + 1]
             next_states.append(nxt.state)
             next_actions_batch.append([combo_to_action_vector(c) for c in nxt.candidates])
+            next_chosen_indices.append(nxt.action_idx)
 
     q_bootstrap_vals: list[float] = []
     if next_states:
         with torch.no_grad():
             next_state_tensor = torch.from_numpy(np.array(next_states)).long().to(device)
-            if use_double_q:
-                # Double Q-learning: select argmax using online network, evaluate using target network.
-                q_online_list = qnet(next_state_tensor, next_actions_batch)
-                best_idxs = [int(q_online_list[i].argmax().item()) for i in range(len(q_online_list))]
-                q_targ_list = qnet_target(next_state_tensor, next_actions_batch)
-                q_bootstrap_vals = [float(q_targ_list[i][best_idxs[i]].item()) for i in range(len(best_idxs))]
-            else:
-                # Vanilla Q-learning: bootstrap with max_a Q_target(s',a)
-                q_targ_list = qnet_target(next_state_tensor, next_actions_batch)
-                q_bootstrap_vals = [float(q_targ_list[i].max().item()) for i in range(len(q_targ_list))]
+            q_targ_list = qnet_target(next_state_tensor, next_actions_batch)
+            q_bootstrap_vals = [
+                float(q_targ_list[i][next_chosen_indices[i]].item()) for i in range(len(next_chosen_indices))
+            ]
 
-    # Build Q-learning targets per episode:
+    # Build 1-step SARSA targets per episode:
     # y_T = r_T
-    # y_t = r_t + gamma * bootstrap(s_{t+1})
+    # y_t = r_t + gamma * Q_target(s_{t+1}, a_{t+1})
     targets: list[float] = []
     bs_ptr = 0
     for ep in episodes:
@@ -383,14 +378,13 @@ def train_q_network(
     epsilon_end: float = 0.05,
     step_penalty: float = -0.01,
     target_update_interval: int = 10,
-    use_double_q: bool = True,
 ):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    qnet = MLPQNetwork(n_players=n_players, device=device).to(device)
-    qnet_target = MLPQNetwork(n_players=n_players, device=device).to(device)
+    qnet = SetPoolQNetwork(n_players=n_players, device=device).to(device)
+    qnet_target = SetPoolQNetwork(n_players=n_players, device=device).to(device)
     qnet_target.load_state_dict(qnet.state_dict())
     qnet_target.eval()
     optimizer = optim.Adam(qnet.parameters(), lr=lr)
@@ -427,10 +421,10 @@ def train_q_network(
         perm = np.random.permutation(episodes_per_batch)
         model_seats = [int(base_seats[i]) for i in perm]
 
-        opponent_strategies_by_episode: list[dict[int, MLPQNetwork | Callable]] = []
+        opponent_strategies_by_episode: list[dict[int, SetPoolQNetwork | Callable]] = []
         for env_idx in range(episodes_per_batch):
             model_seat = model_seats[env_idx]
-            opp_map: dict[int, MLPQNetwork | Callable] = {}
+            opp_map: dict[int, SetPoolQNetwork | Callable] = {}
             for p in all_players:
                 if p == model_seat:
                     continue
@@ -447,14 +441,13 @@ def train_q_network(
             step_penalty=step_penalty,
         )
 
-        q_loss = q_learning_update(
+        q_loss = sarsa_1step_update(
             qnet,
             qnet_target,
             trajectories,
             optimizer,
             gamma=gamma,
             device=device,
-            use_double_q=use_double_q,
         )
 
         # Step the learning rate scheduler once per batch.
@@ -508,7 +501,7 @@ def train_q_network(
 
 
 def win_rate_of_starting_hand_q(
-    qnet: MLPQNetwork, hand: list[int], n_players: int = 4, sims: int = 512, device: str = "cpu"
+    qnet: SetPoolQNetwork, hand: list[int], n_players: int = 4, sims: int = 512, device: str = "cpu"
 ) -> float:
     """Monte Carlo estimate of win rate for seat 0 given a fixed starting hand, using greedy-Q self-play."""
     wins = 0.0
@@ -566,13 +559,13 @@ if __name__ == "__main__":
 
     qnet, loss_history, q_loss_history, exploration_history, eval_episodes, win_rates = train_q_network(
         n_players=n_players,
-        batches=500,
+        batches=10000,
         episodes_per_batch=64,
-        lr=3e-4,
+        lr=8e-4,
         gamma=0.99,
         seed=42,
         device=device,
-        eval_interval=25,
+        eval_interval=500,
         eval_games=400,
         epsilon_start=0.5,
         epsilon_end=0.01,
