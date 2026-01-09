@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Big2 PPO Training Monitor</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/monitor/style.css">
+</head>
+
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <h1 class="title">
+                    <span class="title-icon">🃏</span>
+                    Big2 PPO Training
+                </h1>
+                <div class="status-badge" id="status-badge">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Connecting...</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="timer" id="timer">00:00:00</div>
+            </div>
+        </header>
+
+        <!-- Progress Section -->
+        <section class="progress-section">
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progress-bar"></div>
+                <div class="progress-text" id="progress-text">0 / 0 batches</div>
+            </div>
+            <div class="progress-stats">
+                <div class="stat-mini">
+                    <span class="stat-label">Batch</span>
+                    <span class="stat-value" id="current-batch">0</span>
+                </div>
+                <div class="stat-mini">
+                    <span class="stat-label">Speed</span>
+                    <span class="stat-value" id="batch-speed">- b/s</span>
+                </div>
+                <div class="stat-mini">
+                    <span class="stat-label">ETA</span>
+                    <span class="stat-value" id="eta">--:--:--</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Grid -->
+        <div class="main-grid">
+            <!-- Key Metrics Cards -->
+            <div class="metrics-row">
+                <div class="metric-card win-rate">
+                    <div class="metric-header">
+                        <span class="metric-icon">🏆</span>
+                        <span class="metric-title">Win Rate vs Greedy</span>
+                    </div>
+                    <div class="metric-value" id="win-rate-greedy">--%</div>
+                    <div class="metric-subtitle" id="win-rate-greedy-change">--</div>
+                </div>
+                <div class="metric-card win-rate-smart">
+                    <div class="metric-header">
+                        <span class="metric-icon">🧠</span>
+                        <span class="metric-title">Win Rate vs Smart</span>
+                    </div>
+                    <div class="metric-value" id="win-rate-smart">--%</div>
+                    <div class="metric-subtitle" id="win-rate-smart-change">--</div>
+                </div>
+                <div class="metric-card entropy">
+                    <div class="metric-header">
+                        <span class="metric-icon">🎲</span>
+                        <span class="metric-title">Entropy</span>
+                    </div>
+                    <div class="metric-value" id="entropy-value">--</div>
+                    <div class="metric-subtitle" id="entropy-target">Target: --</div>
+                </div>
+                <div class="metric-card loss">
+                    <div class="metric-header">
+                        <span class="metric-icon">📉</span>
+                        <span class="metric-title">Total Loss</span>
+                    </div>
+                    <div class="metric-value" id="total-loss">--</div>
+                    <div class="metric-subtitle" id="loss-trend">--</div>
+                </div>
+            </div>
+
+            <!-- Charts Row 1 -->
+            <div class="charts-row">
+                <div class="chart-card large">
+                    <h3 class="chart-title">Win Rates Over Time</h3>
+                    <div class="chart-container">
+                        <canvas id="win-rate-chart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3 class="chart-title">Loss Components</h3>
+                    <div class="chart-container">
+                        <canvas id="loss-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts Row 2 -->
+            <div class="charts-row">
+                <div class="chart-card">
+                    <h3 class="chart-title">Entropy & Learning Rate</h3>
+                    <div class="chart-container">
+                        <canvas id="entropy-lr-chart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3 class="chart-title">Opponent Mix (Curriculum)</h3>
+                    <div class="chart-container doughnut-container">
+                        <canvas id="opponent-mix-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Info Cards Row -->
+            <div class="info-row">
+                <div class="info-card">
+                    <h3 class="info-title">Training Parameters</h3>
+                    <div class="info-grid" id="config-grid">
+                        <div class="info-item">
+                            <span class="info-label">Learning Rate</span>
+                            <span class="info-value" id="lr-value">--</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Entropy β</span>
+                            <span class="info-value" id="entropy-beta">--</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">PPO Epochs</span>
+                            <span class="info-value" id="ppo-epochs">--</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Clip ε</span>
+                            <span class="info-value" id="clip-epsilon">--</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Batch Size</span>
+                            <span class="info-value" id="episodes-per-batch">--</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Mini Batch</span>
+                            <span class="info-value" id="mini-batch-size">--</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="info-card">
+                    <h3 class="info-title">Curriculum State</h3>
+                    <div class="info-grid">
+                        <div class="info-item">
+                            <span class="info-label">Checkpoints</span>
+                            <span class="info-value" id="num-checkpoints">0</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">EMA Greedy</span>
+                            <span class="info-value" id="ema-greedy">--</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">EMA Smart</span>
+                            <span class="info-value" id="ema-smart">--</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Mastery Greedy</span>
+                            <span class="info-value" id="mastery-greedy">--</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Mastery Smart</span>
+                            <span class="info-value" id="mastery-smart">--</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Steps/Episode</span>
+                            <span class="info-value" id="steps-per-episode">--</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <span>Last update: <span id="last-update">Never</span></span>
+            <span class="footer-sep">•</span>
+            <span>Polling: <span id="poll-interval">1s</span></span>
+        </footer>
+    </div>
+
+    <script src="/monitor/app.js"></script>
+</body>
+
+</html>

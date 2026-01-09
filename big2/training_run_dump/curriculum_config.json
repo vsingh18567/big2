@@ -1,0 +1,8 @@
+{
+  "greedy_mastery_target": 0.4,
+  "smart_mastery_target": 0.35,
+  "greedy_retention_fraction": 0.15,
+  "smart_retention_fraction": 0.25,
+  "ema_alpha": 0.33,
+  "max_checkpoints": 50
+}

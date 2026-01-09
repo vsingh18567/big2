@@ -232,10 +232,10 @@ class CurriculumConfig:
 
     greedy_mastery_target: float = 0.40  # 40% win rate = mastered greedy
     smart_mastery_target: float = 0.35  # 35% win rate = mastered smart
-    greedy_retention_fraction: float = 0.125  # 12.5% weight for retention of mastered greedy
-    smart_retention_fraction: float = 0.175  # 17.5% weight for retention of mastered smart
+    greedy_retention_fraction: float = 0.15  # 15% weight for retention of mastered greedy
+    smart_retention_fraction: float = 0.25  # 25% weight for retention of mastered smart
     ema_alpha: float = 0.33  # Smoothing factor for EMA
-    max_checkpoints: int = 20  # Keep last N checkpoints
+    max_checkpoints: int = 50  # Keep last N checkpoints
 
 
 @dataclass
@@ -445,25 +445,26 @@ class CheckpointManager:
             # Phase 1: Focus on learning greedy
             greedy_weight = 0.50 + 0.10 * (1.0 - self.mastery_greedy)  # 50-60% when learning
             smart_weight = 0.15 + 0.05 * self.mastery_greedy  # 15-20% gradually increasing
-            current_weight = 0.15 + 0.05 * self.mastery_greedy  # 15-20% gradually increasing
-            checkpoint_weight = 0.05 * self.mastery_greedy  # 0-5% gradually increasing
+            current_weight = 0.1 + 0.05 * self.mastery_greedy  # 10-15% gradually increasing
+            checkpoint_weight = 0.05 + 0.05 * self.mastery_greedy  # 5-10% gradually increasing
             random_weight = 0.10 - 0.05 * self.mastery_greedy  # 10-5% gradually decreasing
         elif self.mastery_smart < 1.0:
             # Phase 2: Focus on learning smart, retain greedy
             greedy_weight = self.config.greedy_retention_fraction
-            smart_weight = 0.45 + 0.05 * (1.0 - self.mastery_smart)  # 45-50% when learning
-            current_weight = 0.25 + 0.05 * self.mastery_smart  # 25-30% gradually increasing
-            checkpoint_weight = 0.10 + 0.05 * self.mastery_smart  # 10-15% gradually increasing
+            smart_weight = 0.4 + 0.05 * (1.0 - self.mastery_smart)  # 40-45% when learning
+            current_weight = 0.20 + 0.05 * self.mastery_smart  # 20-25% gradually increasing
+            checkpoint_weight = 0.20 + 0.05 * self.mastery_smart  # 15-20% gradually increasing
             random_weight = 0.05
         else:
             # Phase 3: Both mastered, focus on self-play
             greedy_weight = self.config.greedy_retention_fraction
             smart_weight = self.config.smart_retention_fraction
-            # Remaining weight for self-play (current + checkpoint) and random
-            remaining_weight = 1.0 - greedy_weight - smart_weight - 0.05  # Reserve 5% for random
-            current_weight = remaining_weight * 0.75  # 75% of remaining to current policy
-            checkpoint_weight = remaining_weight * 0.25  # 25% of remaining to checkpoints
             random_weight = 0.05
+
+            # Remaining weight for self-play (current + checkpoint)
+            remaining_weight = 1.0 - greedy_weight - smart_weight - random_weight
+            current_weight = remaining_weight * 0.4  # 50% of remaining to current policy
+            checkpoint_weight = remaining_weight * 0.6  # 50% of remaining to checkpoints
 
         return OpponentMix(
             greedy_weight=greedy_weight,
@@ -548,11 +549,27 @@ def plot_training_curves(
     eval_episodes=None,
     win_rates=None,
     win_rates_smart=None,
+    opponent_mixes=None,
     save_path="training_curves.png",
 ):
     """Plot training curves and save to file."""
-    # Create figure with 6 subplots if we have evaluation data, otherwise 5
-    if eval_episodes and win_rates:
+    # Create figure with subplots - adjust layout based on available data
+    has_eval = eval_episodes and win_rates
+    has_opponent_mix = opponent_mixes and len(opponent_mixes) > 0
+
+    if has_eval and has_opponent_mix:
+        # 7 subplots: 5 loss/metrics + win rate + opponent mix
+        fig = plt.figure(figsize=(20, 12))
+        gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax2 = fig.add_subplot(gs[0, 1])
+        ax3 = fig.add_subplot(gs[1, 0])
+        ax4 = fig.add_subplot(gs[1, 1])
+        ax5 = fig.add_subplot(gs[2, 0])
+        ax6 = fig.add_subplot(gs[:2, 2])  # Win rate takes top 2 rows of right column
+        ax7 = fig.add_subplot(gs[2, 1:])  # Opponent mix takes bottom row spanning 2 columns
+        axes = [ax1, ax2, ax3, ax4, ax5, ax6, ax7]
+    elif has_eval:
         fig = plt.figure(figsize=(18, 12))
         gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
         ax1 = fig.add_subplot(gs[0, 0])
@@ -647,6 +664,66 @@ def plot_training_curves(
         axes[5].legend(loc="lower right")
         # Add percentage labels
         axes[5].yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+
+    # Opponent Mix (if available)
+    if opponent_mixes and len(opponent_mixes) > 0 and len(axes) > 6:
+        # Extract weights for each opponent type
+        greedy_weights = [mix.greedy_weight for mix in opponent_mixes]
+        smart_weights = [mix.smart_weight for mix in opponent_mixes]
+        current_weights = [mix.current_weight for mix in opponent_mixes]
+        checkpoint_weights = [mix.checkpoint_weight for mix in opponent_mixes]
+        random_weights = [mix.random_weight for mix in opponent_mixes]
+
+        # Use stacked area plot to show composition
+        axes[6].fill_between(eval_episodes, 0, greedy_weights, label="Greedy", color="#FF6B6B", alpha=0.7)
+        bottom = greedy_weights
+        axes[6].fill_between(
+            eval_episodes,
+            bottom,
+            [b + s for b, s in zip(bottom, smart_weights, strict=False)],
+            label="Smart",
+            color="#4ECDC4",
+            alpha=0.7,
+        )
+        bottom = [b + s for b, s in zip(bottom, smart_weights, strict=False)]
+        axes[6].fill_between(
+            eval_episodes,
+            bottom,
+            [b + c for b, c in zip(bottom, current_weights, strict=False)],
+            label="Current",
+            color="#95E1D3",
+            alpha=0.7,
+        )
+        bottom = [b + c for b, c in zip(bottom, current_weights, strict=False)]
+        axes[6].fill_between(
+            eval_episodes,
+            bottom,
+            [b + c for b, c in zip(bottom, checkpoint_weights, strict=False)],
+            label="Checkpoint",
+            color="#F38181",
+            alpha=0.7,
+        )
+        bottom = [b + c for b, c in zip(bottom, checkpoint_weights, strict=False)]
+        axes[6].fill_between(
+            eval_episodes,
+            bottom,
+            [b + r for b, r in zip(bottom, random_weights, strict=False)],
+            label="Random",
+            color="#AA96DA",
+            alpha=0.7,
+        )
+
+        axes[6].set_xlabel("Episode", fontsize=11)
+        axes[6].set_ylabel("Opponent Mix Weight", fontsize=11)
+        axes[6].set_title("Opponent Strategy Distribution", fontsize=12, fontweight="bold")
+        axes[6].grid(True, alpha=0.3)
+        axes[6].set_xlim(
+            min(eval_episodes) if eval_episodes else 0, max(eval_episodes) if eval_episodes else len(loss_history)
+        )
+        axes[6].set_ylim(0, 1)
+        axes[6].legend(loc="upper left", fontsize=9)
+        # Add percentage labels
+        axes[6].yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches="tight")

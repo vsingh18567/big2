@@ -28,7 +28,7 @@ function showSetup() {
 }
 
 async function startGame() {
-    const modelPath = document.getElementById("model-path").value.trim() || "big2_model.pt";
+    const modelPath = document.getElementById("model-path").value.trim() || "models/big2_model.pt";
     const nPlayers = parseInt(document.getElementById("n-players").value);
     const device = document.getElementById("device").value;
 

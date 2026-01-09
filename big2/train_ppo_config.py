@@ -14,6 +14,7 @@ class PPOConfig:
 
     # Game settings
     n_players: int = 4
+    model_seat_count: int = 1  # Number of seats controlled by the learning policy per game
 
     # Training loop
     batches: int = 5000
@@ -43,6 +44,12 @@ class PPOConfig:
     target_entropy_end: float = 0.45
     entropy_beta_min: float = 0.05
     entropy_beta_max: float = 0.2
+
+    # Reward shaping (PPO only)
+    # Note: terminal rewards are handled inside `train_ppo.py` and are additive.
+    step_penalty: float = -0.001
+    progress_reward_coef: float = 0.05
+    pass_penalty: float = -0.005
 
     # Evaluation
     eval_interval: int = 50

@@ -1,4 +1,5 @@
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -211,7 +212,9 @@ def train_selfplay(
             )
 
             # Save checkpoint and add to manager
-            save_path = f"big2_model_step_{batch}.pt"
+            models_dir = Path("models")
+            models_dir.mkdir(exist_ok=True)
+            save_path = models_dir / f"big2_model_step_{batch}.pt"
             torch.save(policy.state_dict(), save_path)
             print(f"Checkpoint saved to {save_path}")
 
@@ -274,7 +277,9 @@ if __name__ == "__main__":
     print("Win rate:", val)
 
     # Save the trained model
-    save_path = "big2_model.pt"
+    models_dir = Path("models")
+    models_dir.mkdir(exist_ok=True)
+    save_path = str(models_dir / "big2_model.pt")
     torch.save(policy.state_dict(), save_path)
     print(f"\nModel weights saved to {save_path}")
 

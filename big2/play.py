@@ -80,7 +80,7 @@ def get_human_choice(candidates: list[Combo], hand: list[int]) -> Combo:
             exit(0)
 
 
-def play_interactive_game(model_path: str = "big2_model.pt", n_players: int = 4, device: str = "cpu"):
+def play_interactive_game(model_path: str = "models/big2_model.pt", n_players: int = 4, device: str = "cpu"):
     """Play an interactive game of Big 2 against trained AI."""
     print("=" * 80)
     print("🎴 Big 2 - Interactive Game")
@@ -195,7 +195,7 @@ def main():
     import sys
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "big2_model.pt"
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "models/big2_model.pt"
     n_players = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 
     try:

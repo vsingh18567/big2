@@ -1,6 +1,7 @@
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -24,6 +25,7 @@ from big2.train_helpers import (
     value_of_starting_hand,
 )
 from big2.train_ppo_config import PPOConfig, dump_training_run
+from big2.training_monitor import TrainingMonitor
 
 
 @dataclass
@@ -36,7 +38,36 @@ class PPOStepRecord:
     old_logprob: torch.Tensor
     reward: float
     value: torch.Tensor
+    n_cards_before: int | None = None
     done: bool = False
+
+
+def _shaped_step_reward(
+    *,
+    action: Combo,
+    candidates: list[Combo],
+    n_cards_before: int,
+    n_cards_after: int,
+    cards_per_player: int,
+    step_penalty: float,
+    progress_reward_coef: float,
+    pass_penalty: float,
+) -> float:
+    """Compute dense reward shaping for PPO.
+
+    - Encourages shedding cards (normalized by cards_per_player)
+    - Discourages passing when a non-pass play exists
+    - Keeps a small step penalty to prefer shorter games
+    """
+    # Progress: cards removed from hand by the action (>= 0)
+    cards_played = max(0, n_cards_before - n_cards_after)
+    progress = (cards_played / max(1, cards_per_player)) * progress_reward_coef
+
+    # Passing when you could have played something (mild penalty)
+    has_non_pass = any(c.type != PASS for c in candidates)
+    pass_cost = pass_penalty if (action.type == PASS and has_non_pass) else 0.0
+
+    return step_penalty + progress + pass_cost
 
 
 def collect_ppo_trajectories(
@@ -44,8 +75,12 @@ def collect_ppo_trajectories(
     policy: nn.Module,
     episodes_per_batch: int,
     opponent_strategies_by_episode: list[dict[int, nn.Module | Callable]],
-    model_seats: list[int],
+    model_seats_by_episode: list[list[int]],
     device: str,
+    *,
+    step_penalty: float = -0.001,
+    progress_reward_coef: float = 0.01,
+    pass_penalty: float = -0.001,
 ) -> dict[int, list[PPOStepRecord]]:
     """
     Collect trajectories for PPO training.
@@ -53,15 +88,17 @@ def collect_ppo_trajectories(
     """
     trajectories: dict[int, list[PPOStepRecord]] = {p: [] for p in range(env.n_players)}
 
-    if len(model_seats) != episodes_per_batch:
-        raise ValueError("model_seats must have length episodes_per_batch")
+    if len(model_seats_by_episode) != episodes_per_batch:
+        raise ValueError("model_seats_by_episode must have length episodes_per_batch")
     if len(opponent_strategies_by_episode) != episodes_per_batch:
         raise ValueError("opponent_strategies_by_episode must have length episodes_per_batch")
 
     for ep_idx in range(episodes_per_batch):
-        model_seat = model_seats[ep_idx]
+        model_seats = set(model_seats_by_episode[ep_idx])
+        if not model_seats:
+            raise ValueError("At least one model seat is required per episode")
         state = env.reset()
-        episode_trajs: dict[int, list[PPOStepRecord]] = {model_seat: []}
+        episode_trajs: dict[int, list[PPOStepRecord]] = {seat: [] for seat in model_seats}
         opponent_strategies = opponent_strategies_by_episode[ep_idx]
 
         while True:
@@ -70,7 +107,7 @@ def collect_ppo_trajectories(
             if not candidates:
                 candidates = [Combo(PASS, [], ())]
 
-            if p != model_seat:
+            if p not in model_seats:
                 # Opponent player: use provided strategy
                 strategy = opponent_strategies.get(p, greedy_strategy)
                 if isinstance(strategy, nn.Module):
@@ -96,9 +133,21 @@ def collect_ppo_trajectories(
                 value = values[0]
 
                 action = candidates[int(idx.item())]
+                n_before = len(env.hands[p])
                 next_state, done = env.step(action)
-                reward = -0.001  # Small step penalty to encourage finishing quickly
-                episode_trajs[model_seat].append(
+                n_after = len(env.hands[p])
+                cards_per_player = 52 // env.n_players
+                reward = _shaped_step_reward(
+                    action=action,
+                    candidates=candidates,
+                    n_cards_before=n_before,
+                    n_cards_after=n_after,
+                    cards_per_player=cards_per_player,
+                    step_penalty=step_penalty,
+                    progress_reward_coef=progress_reward_coef,
+                    pass_penalty=pass_penalty,
+                )
+                episode_trajs[p].append(
                     PPOStepRecord(
                         state=state.copy(),
                         action_idx=int(idx.item()),
@@ -106,6 +155,7 @@ def collect_ppo_trajectories(
                         old_logprob=old_logprob.detach(),
                         reward=reward,
                         value=value.detach(),
+                        n_cards_before=n_before,
                         done=False,
                     )
                 )
@@ -113,16 +163,21 @@ def collect_ppo_trajectories(
             if done:
                 # Assign terminal rewards
                 winner = env.winner
-                if len(episode_trajs[model_seat]) > 0:
-                    if model_seat == winner:
-                        final_r = 1.0
-                    else:
-                        final_r = -len(env.hands[model_seat]) / (52 // env.n_players)
-                    # Add terminal reward on top of intermediate step penalty
-                    episode_trajs[model_seat][-1].reward += final_r
-                    episode_trajs[model_seat][-1].done = True
-                    # Append to full trajectories
-                    trajectories[model_seat].extend(episode_trajs[model_seat])
+                for model_seat in model_seats:
+                    if len(episode_trajs[model_seat]) > 0:
+                        if model_seat == winner:
+                            final_r = 1.0
+                        else:
+                            # Scale terminal loss by remaining cards, but clamp to -1 once you're
+                            # above half a starting hand. (In 4p: cards_per_player=13, half=6.5.)
+                            cards_per_player = 52 // env.n_players
+                            half_hand = cards_per_player / 2
+                            final_r = -min(1.0, len(env.hands[model_seat]) / half_hand)
+                        # Add terminal reward on top of intermediate step penalty
+                        episode_trajs[model_seat][-1].reward += final_r
+                        episode_trajs[model_seat][-1].done = True
+                        # Append to full trajectories
+                        trajectories[model_seat].extend(episode_trajs[model_seat])
                 break
 
             state = next_state
@@ -135,8 +190,12 @@ def collect_ppo_trajectories_batched(
     policy: nn.Module,
     episodes_per_batch: int,
     opponent_strategies_by_env: list[dict[int, nn.Module | Callable]],
-    model_seats: list[int],
+    model_seats_by_env: list[list[int]],
     device: str,
+    *,
+    step_penalty: float = -0.001,
+    progress_reward_coef: float = 0.05,
+    pass_penalty: float = -0.005,
 ) -> dict[int, list[PPOStepRecord]]:
     """
     Collect trajectories for PPO training with batched forward passes.
@@ -146,8 +205,8 @@ def collect_ppo_trajectories_batched(
         n_players: Number of players in the game
         policy: The policy network
         episodes_per_batch: Number of episodes to collect
-        opponent_strategies: Mapping of opponent player IDs to their strategies
-        model_players: Set of player IDs controlled by the model
+        opponent_strategies_by_env: Per-environment mapping of opponent player IDs to their strategies
+        model_seats_by_env: Per-environment list of player IDs controlled by the model
         device: Device to run on
 
     Returns:
@@ -158,13 +217,13 @@ def collect_ppo_trajectories_batched(
     # Create multiple environments to run in parallel
     envs = [Big2Env(n_players) for _ in range(episodes_per_batch)]
     states = [env.reset() for env in envs]
-    if len(model_seats) != episodes_per_batch:
-        raise ValueError("model_seats must have length episodes_per_batch")
+    if len(model_seats_by_env) != episodes_per_batch:
+        raise ValueError("model_seats_by_env must have length episodes_per_batch")
     if len(opponent_strategies_by_env) != episodes_per_batch:
         raise ValueError("opponent_strategies_by_env must have length episodes_per_batch")
 
     episode_trajs: list[dict[int, list[PPOStepRecord]]] = [
-        {model_seats[env_idx]: []} for env_idx in range(episodes_per_batch)
+        {seat: [] for seat in model_seats_by_env[env_idx]} for env_idx in range(episodes_per_batch)
     ]
     active_envs = list(range(episodes_per_batch))
 
@@ -177,23 +236,28 @@ def collect_ppo_trajectories_batched(
         for env_idx in active_envs:
             env = envs[env_idx]
             p = env.current_player
+            if not model_seats_by_env[env_idx]:
+                raise ValueError("At least one model seat is required per environment")
             candidates = env.legal_candidates(p)
             if not candidates:
                 candidates = [Combo(PASS, [], ())]
             env_info.append((env_idx, env, p, candidates))
+        candidates_by_env_idx = {env_idx: candidates for env_idx, _env, _p, candidates in env_info}
 
         # Batch process model players
         batch_states = []
         batch_candidates = []
         batch_env_indices = []
         batch_players = []
+        batch_n_cards_before: list[int] = []
 
         for env_idx, _, p, candidates in env_info:
-            if p == model_seats[env_idx]:
+            if p in model_seats_by_env[env_idx]:
                 batch_states.append(states[env_idx])
                 batch_candidates.append(candidates)
                 batch_env_indices.append(env_idx)
                 batch_players.append(p)
+                batch_n_cards_before.append(len(envs[env_idx].hands[p]))
 
         # Batch forward pass for all model players
         if batch_states:
@@ -221,8 +285,9 @@ def collect_ppo_trajectories_batched(
                         action_idx=action_idx,
                         candidates=batch_candidates[i],
                         old_logprob=old_logprob.detach(),
-                        reward=-0.001,  # Small step penalty to encourage finishing quickly
+                        reward=0.0,  # filled after env.step once we know card delta
                         value=value.detach(),
+                        n_cards_before=batch_n_cards_before[i],
                         done=False,
                     )
                 )
@@ -248,22 +313,43 @@ def collect_ppo_trajectories_batched(
         for env_idx in active_envs:
             env = envs[env_idx]
             action = env_actions[env_idx]
+            actor = env.current_player
+            # Only compute shaping for model-controlled players (we store trajectories only for them)
+            if actor in model_seats_by_env[env_idx]:
+                n_before = len(env.hands[actor])
             next_state, done = env.step(action)
+            if actor in model_seats_by_env[env_idx]:
+                n_after = len(env.hands[actor])
+                cards_per_player = 52 // env.n_players
+                candidates = candidates_by_env_idx[env_idx]
+                shaped = _shaped_step_reward(
+                    action=action,
+                    candidates=candidates,
+                    n_cards_before=n_before,
+                    n_cards_after=n_after,
+                    cards_per_player=cards_per_player,
+                    step_penalty=step_penalty,
+                    progress_reward_coef=progress_reward_coef,
+                    pass_penalty=pass_penalty,
+                )
+                # Update the last stored record reward for this actor
+                if episode_trajs[env_idx][actor]:
+                    episode_trajs[env_idx][actor][-1].reward = shaped
 
             if done:
                 # Assign terminal rewards
                 winner = env.winner
-                q = model_seats[env_idx]
-                if len(episode_trajs[env_idx][q]) > 0:
-                    if q == winner:
-                        final_r = 1.0
-                    else:
-                        final_r = -len(env.hands[q]) / (52 // env.n_players)
-                    # Add terminal reward on top of intermediate step penalty
-                    episode_trajs[env_idx][q][-1].reward += final_r
-                    episode_trajs[env_idx][q][-1].done = True
-                    # Append to full trajectories
-                    trajectories[q].extend(episode_trajs[env_idx][q])
+                for q in model_seats_by_env[env_idx]:
+                    if len(episode_trajs[env_idx][q]) > 0:
+                        if q == winner:
+                            final_r = 1.0
+                        else:
+                            final_r = -len(env.hands[q]) / (52 // env.n_players)
+                        # Add terminal reward on top of intermediate step penalty
+                        episode_trajs[env_idx][q][-1].reward += final_r
+                        episode_trajs[env_idx][q][-1].done = True
+                        # Append to full trajectories
+                        trajectories[q].extend(episode_trajs[env_idx][q])
             else:
                 states[env_idx] = next_state
                 next_active_envs.append(env_idx)
@@ -473,6 +559,7 @@ def ppo_update(
 def train_ppo(
     config: PPOConfig | None = None,
     n_players=4,
+    model_seat_count=1,
     batches=2000,
     episodes_per_batch=10,
     ppo_epochs=4,
@@ -489,6 +576,7 @@ def train_ppo(
     mini_batch_size=None,
     use_batched_collection=True,
     policy_arch: str = "mlp",
+    monitor: TrainingMonitor | None = None,
     **kwargs,
 ):
     """
@@ -502,6 +590,7 @@ def train_ppo(
         # Backward compatibility: construct config from kwargs
         config = PPOConfig(
             n_players=n_players,
+            model_seat_count=model_seat_count,
             batches=batches,
             episodes_per_batch=episodes_per_batch,
             ppo_epochs=ppo_epochs,
@@ -521,13 +610,19 @@ def train_ppo(
             **kwargs,
         )
 
+    if not 1 <= config.model_seat_count <= config.n_players:
+        raise ValueError("model_seat_count must be between 1 and n_players")
+
     random.seed(config.seed)
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
 
     all_players = set(range(config.n_players))
 
-    print("Training across seats: enabled (one model-controlled seat per environment, rotated each batch)")
+    print(
+        f"Training across seats: {config.model_seat_count} model-controlled seat(s) per environment "
+        "(sampled each episode)"
+    )
     print("Opponent diversity within batch: enabled (opponents sampled per-environment/per-seat)")
     print(f"PPO parameters: epochs={config.ppo_epochs}, clip_epsilon={config.clip_epsilon}")
     print(f"Policy architecture: {config.policy_arch}")
@@ -572,21 +667,40 @@ def train_ppo(
     eval_episodes = []
     win_rates = []
     win_rates_smart = []
+    opponent_mixes = []  # Track opponent mix at each evaluation checkpoint
+
+    # Initialize training monitor if provided
+    if monitor is not None:
+        config_summary = {
+            "n_players": config.n_players,
+            "model_seat_count": config.model_seat_count,
+            "episodes_per_batch": config.episodes_per_batch,
+            "ppo_epochs": config.ppo_epochs,
+            "clip_epsilon": config.clip_epsilon,
+            "lr": config.lr,
+            "entropy_beta": config.entropy_beta,
+            "gamma": config.gamma,
+            "lam": config.lam,
+            "mini_batch_size": config.mini_batch_size,
+            "policy_arch": config.policy_arch,
+        }
+        monitor.start_training(config.batches, config_summary)
 
     for batch in tqdm(range(1, config.batches + 1)):
         # Collect trajectories
-        # Rotate model seat across environments to learn from all positions.
-        base_seats = np.arange(config.episodes_per_batch) % config.n_players
-        perm = np.random.permutation(config.episodes_per_batch)
-        model_seats = [int(base_seats[i]) for i in perm]
+        model_seats_by_env: list[list[int]] = []
+        for _ in range(config.episodes_per_batch):
+            seat_order = np.random.permutation(config.n_players)
+            seats = seat_order[: config.model_seat_count]
+            model_seats_by_env.append([int(s) for s in seats])
         frac = batch / config.batches
         target_entropy = config.target_entropy_start + (config.target_entropy_end - config.target_entropy_start) * frac
         opponent_strategies_by_env: list[dict[int, nn.Module | Callable]] = []
         for env_idx in range(config.episodes_per_batch):
-            model_seat = model_seats[env_idx]
+            model_seats = set(model_seats_by_env[env_idx])
             opp_map: dict[int, nn.Module | Callable] = {}
             for p in all_players:
-                if p == model_seat:
+                if p in model_seats:
                     continue
                 opp_map[p] = checkpoint_manager.sample_opponent_policy(policy)
             opponent_strategies_by_env.append(opp_map)
@@ -597,12 +711,23 @@ def train_ppo(
                 policy,
                 config.episodes_per_batch,
                 opponent_strategies_by_env,
-                model_seats,
+                model_seats_by_env,
                 config.device,
+                step_penalty=config.step_penalty,
+                progress_reward_coef=config.progress_reward_coef,
+                pass_penalty=config.pass_penalty,
             )
         else:
             trajectories = collect_ppo_trajectories(
-                env, policy, config.episodes_per_batch, opponent_strategies_by_env, model_seats, config.device
+                env,
+                policy,
+                config.episodes_per_batch,
+                opponent_strategies_by_env,
+                model_seats_by_env,
+                config.device,
+                step_penalty=config.step_penalty,
+                progress_reward_coef=config.progress_reward_coef,
+                pass_penalty=config.pass_penalty,
             )
 
         # PPO update
@@ -637,6 +762,22 @@ def train_ppo(
         value_loss_history.append(value_loss)
         entropy_history.append(entropy)
 
+        # Update training monitor
+        if monitor is not None:
+            current_lr = scheduler.get_last_lr()[0]
+            total_steps = sum(len(v) for v in trajectories.values())
+            steps_per_ep = total_steps / config.episodes_per_batch if config.episodes_per_batch > 0 else 0.0
+            monitor.update_batch(
+                batch=batch,
+                policy_loss=policy_loss,
+                value_loss=value_loss,
+                entropy=entropy,
+                total_loss=total_loss,
+                lr=current_lr,
+                entropy_beta=current_entropy_beta,
+                steps_per_episode=steps_per_ep,
+            )
+
         # Evaluation every eval_interval batches
         if batch % config.eval_interval == 0:
             total_steps = sum(len(v) for v in trajectories.values())
@@ -656,6 +797,34 @@ def train_ppo(
 
             # Update mastery levels based on win rates against greedy and smart
             checkpoint_manager.update_mastery(metrics.win_rate_vs_greedy, metrics.win_rate_vs_smart)
+
+            # Track opponent mix at this checkpoint
+            opponent_mix = checkpoint_manager.compute_dynamic_opponent_mix()
+            opponent_mixes.append(opponent_mix)
+
+            # Update training monitor with evaluation results
+            if monitor is not None:
+                monitor.update_evaluation(
+                    batch=batch,
+                    win_rate_greedy=metrics.win_rate_vs_greedy,
+                    win_rate_smart=metrics.win_rate_vs_smart,
+                    win_rate_random=metrics.win_rate_vs_random,
+                    avg_cards_remaining=metrics.avg_cards_remaining_when_losing,
+                )
+                # Update curriculum state
+                ema_greedy = checkpoint_manager.ema_win_rate_greedy or 0.0
+                ema_smart = checkpoint_manager.ema_win_rate_smart or 0.0
+                from dataclasses import asdict
+
+                mix_dict = asdict(opponent_mix)
+                monitor.update_curriculum(
+                    num_checkpoints=len(checkpoint_manager.checkpoints),
+                    ema_win_rate_greedy=ema_greedy,
+                    ema_win_rate_smart=ema_smart,
+                    mastery_greedy=checkpoint_manager.mastery_greedy,
+                    mastery_smart=checkpoint_manager.mastery_smart,
+                    opponent_mix=mix_dict,
+                )
 
             print(f"[Step {batch}] Evaluation Results ({metrics.total_games} games):")
             wins_vs_greedy = int(metrics.win_rate_vs_greedy * metrics.total_games)
@@ -692,11 +861,17 @@ def train_ppo(
             )
 
             # Save checkpoint and add to manager
-            save_path = f"big2_model_step_{batch}.pt"
+            models_dir = Path("models")
+            models_dir.mkdir(exist_ok=True)
+            save_path = models_dir / f"big2_model_step_{batch}.pt"
             torch.save(policy.state_dict(), save_path)
             print(f"Checkpoint saved to {save_path}")
 
             checkpoint_manager.add_checkpoint(batch, policy)
+
+    # Finish training monitor
+    if monitor is not None:
+        monitor.finish_training(success=True, message="Training completed successfully")
 
     return (
         policy,
@@ -708,6 +883,7 @@ def train_ppo(
         eval_episodes,
         win_rates,
         win_rates_smart,
+        opponent_mixes,
     )
 
 
@@ -723,20 +899,21 @@ if __name__ == "__main__":
     # Create config with all training parameters
     config = PPOConfig(
         n_players=n_players,
-        batches=5000,
+        model_seat_count=1,
+        batches=10000,
         episodes_per_batch=64,
-        ppo_epochs=2,
+        ppo_epochs=4,
         clip_epsilon=0.2,
-        lr=1e-3,
+        lr=1e-4,
         entropy_beta=0.05,
         value_coef=0.5,
         gamma=0.99,
         lam=0.95,
         seed=42,
         device=device,
-        eval_interval=50,
-        eval_games=500,
-        mini_batch_size=256,
+        eval_interval=100,
+        eval_games=250,
+        mini_batch_size=512,
         policy_arch="setpool",
     )
 
@@ -744,6 +921,10 @@ if __name__ == "__main__":
     config.save("training_config.json")
     print("Training config saved to training_config.json")
     # To load: config = PPOConfig.load("training_config.json")
+
+    # Create training monitor for real-time dashboard
+    monitor = TrainingMonitor(stats_file="training_stats.json")
+    print("Training monitor initialized - view at http://localhost:8000/monitor")
 
     (
         policy,
@@ -755,7 +936,8 @@ if __name__ == "__main__":
         eval_episodes,
         win_rates,
         win_rates_smart,
-    ) = train_ppo(config=config)
+        opponent_mixes,
+    ) = train_ppo(config=config, monitor=monitor)
 
     hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
     val = value_of_starting_hand(policy, hand, n_players=n_players, sims=64, device=device)
@@ -768,7 +950,9 @@ if __name__ == "__main__":
     print("Win rate:", val)
 
     # Save the trained model
-    model_save_path = "big2_model.pt"
+    models_dir = Path("models")
+    models_dir.mkdir(exist_ok=True)
+    model_save_path = str(models_dir / "big2_model.pt")
     torch.save(policy.state_dict(), model_save_path)
     print(f"\nModel weights saved to {model_save_path}")
 
@@ -783,6 +967,7 @@ if __name__ == "__main__":
         eval_episodes,
         win_rates,
         win_rates_smart,
+        opponent_mixes=opponent_mixes,
         save_path=training_curves_path,
     )
 

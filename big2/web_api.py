@@ -3,6 +3,7 @@
 FastAPI backend for Big 2 web interface.
 """
 
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from torch import nn
@@ -241,7 +242,7 @@ async def root():
 
 
 class StartGameRequest(BaseModel):
-    model_path: str = "big2_model.pt"
+    model_path: str = "models/big2_model.pt"
     n_players: int = 4
     device: str = "cpu"
 
@@ -358,3 +359,54 @@ async def get_game_status(game_id: str) -> dict[str, Any]:
         "winner": game_state.env.winner,
         "is_human_winner": game_state.env.winner == game_state.human_player if game_state.env.done else None,
     }
+
+
+# ============================================================================
+# Training Monitor Endpoints
+# ============================================================================
+
+MONITOR_DIR = BASE_DIR / "monitor"
+TRAINING_STATS_FILE = BASE_DIR / "training_stats.json"
+
+
+@app.get("/monitor", response_class=HTMLResponse)
+async def monitor_page():
+    """Serve the training monitor dashboard."""
+    index_path = MONITOR_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Monitor files not found")
+    return FileResponse(str(index_path))
+
+
+@app.get("/monitor/{filename}")
+async def monitor_static(filename: str):
+    """Serve static files for the monitor dashboard."""
+    file_path = MONITOR_DIR / filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"File {filename} not found")
+
+    # Determine content type
+    content_types = {
+        ".css": "text/css",
+        ".js": "application/javascript",
+        ".html": "text/html",
+    }
+    suffix = file_path.suffix.lower()
+    media_type = content_types.get(suffix, "application/octet-stream")
+
+    return FileResponse(str(file_path), media_type=media_type)
+
+
+@app.get("/api/monitor/stats")
+async def get_training_stats() -> dict[str, Any]:
+    """Get current training statistics."""
+    # Try to read from the training stats file
+    if not TRAINING_STATS_FILE.exists():
+        raise HTTPException(status_code=404, detail="No training stats available")
+
+    try:
+        with open(TRAINING_STATS_FILE) as f:
+            stats = json.load(f)
+        return stats
+    except (json.JSONDecodeError, OSError) as e:
+        raise HTTPException(status_code=500, detail=f"Error reading stats: {e}") from e
