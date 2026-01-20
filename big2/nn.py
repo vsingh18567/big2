@@ -53,6 +53,18 @@ class MLPQNetworkConfig:
     device: str = "cpu"
 
 
+@dataclass
+class SetPoolQNetworkConfig:
+    """Configuration for SetPoolQNetwork architecture."""
+
+    n_players: int = 4
+    card_vocab: int = 53
+    card_emb_dim: int = 64
+    hidden: int = 768
+    action_hidden: int = 256
+    device: str = "cpu"
+
+
 def input_dim(n_players: int = 4) -> int:
     """Calculate input dimension based on number of players.
 
@@ -744,18 +756,6 @@ class MLPQNetwork(nn.Module, CandidateScoringMixin):
 
     def forward(self, state_tensor: torch.Tensor, actions_batch: list[list[np.ndarray]]) -> list[torch.Tensor]:
         return self.q_values(state_tensor, actions_batch)
-
-
-@dataclass
-class SetPoolQNetworkConfig:
-    """Configuration for SetPoolQNetwork architecture."""
-
-    n_players: int = 4
-    card_vocab: int = 53
-    card_emb_dim: int = 64
-    hidden: int = 768
-    action_hidden: int = 256
-    device: str = "cpu"
 
 
 class SetPoolQNetwork(nn.Module, CandidateScoringMixin):

@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from big2.nn import combo_to_action_vector
+from big2.nn import SetPoolQNetwork, combo_to_action_vector
 from big2.simulator.cards import PASS, Combo, card_name
 from big2.simulator.env import Big2Env
 from big2.simulator.greedy_strategy import greedy_strategy
@@ -71,24 +71,42 @@ def safe_categorical_from_logits(logits: torch.Tensor, candidates: list[Combo]) 
     return torch.distributions.Categorical(probs=probs)
 
 
-def select_action(
+def _policy_logits_and_value(
     policy: nn.Module, state: np.ndarray, candidates: list[Combo]
-) -> tuple[Combo, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    # Prepare batch with one element
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run a single-state policy forward pass and return logits/value."""
     st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)  # type: ignore[attr-defined]
     action_feats = [[combo_to_action_vector(c) for c in candidates]]
     logits_list, values = policy(st, action_feats)
-    logits = logits_list[0]
-    # Use safe Categorical creation
+    return logits_list[0], values[0]
+
+
+def sample_action_from_policy(
+    policy: nn.Module, state: np.ndarray, candidates: list[Combo]
+) -> tuple[int, Combo, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sample an action from the policy distribution and return details."""
+    logits, value = _policy_logits_and_value(policy, state, candidates)
     dist = safe_categorical_from_logits(logits, candidates)
     idx = dist.sample()
     logprob = dist.log_prob(idx)
     entropy = dist.entropy()
-    # Compute max logprob across all actions
-    probs = dist.probs
-    max_prob = probs.max()
-    chosen = candidates[int(idx.item())]
-    value = values[0]
+    max_prob = dist.probs.max()
+    action_idx = int(idx.item())
+    return action_idx, candidates[action_idx], logprob, entropy, value, max_prob
+
+
+def select_action_sampled(policy: nn.Module, state: np.ndarray, candidates: list[Combo]) -> Combo:
+    """Sample an action without tracking gradients (for opponents)."""
+    with torch.no_grad():
+        action_idx, action, _logprob, _entropy, _value, _max_prob = sample_action_from_policy(policy, state, candidates)
+    return action
+
+
+def select_action(
+    policy: nn.Module, state: np.ndarray, candidates: list[Combo]
+) -> tuple[Combo, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sample an action and return tensors used for policy-gradient losses."""
+    _action_idx, chosen, logprob, entropy, value, max_prob = sample_action_from_policy(policy, state, candidates)
     return chosen, logprob, entropy, value, max_prob
 
 
@@ -130,7 +148,7 @@ def episode(
             strategy = opponent_strategies[p]
             if isinstance(strategy, nn.Module):
                 # Policy-based opponent (current policy or past checkpoint)
-                action = select_action_greedy(strategy, state, candidates)
+                action = select_action_sampled(strategy, state, candidates)
             elif strategy == smart_strategy:
                 # Smart strategy needs hand and trick_pile
                 action = strategy(candidates, env.hands[p], env.trick_pile)
@@ -201,10 +219,7 @@ def compute_returns(rewards: list[float], gamma: float = 1.0) -> list[float]:
 def select_action_greedy(policy: nn.Module, state: np.ndarray, candidates: list[Combo]) -> Combo:
     """Select action greedily (no sampling) for evaluation."""
     with torch.no_grad():
-        st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)  # type: ignore[attr-defined]
-        action_feats = [[combo_to_action_vector(c) for c in candidates]]
-        logits_list, _ = policy(st, action_feats)
-        logits = logits_list[0]
+        logits, _value = _policy_logits_and_value(policy, state, candidates)
         idx = logits.argmax()
         return candidates[idx]
 
@@ -212,6 +227,35 @@ def select_action_greedy(policy: nn.Module, state: np.ndarray, candidates: list[
 def random_strategy(candidates: list[Combo]) -> Combo:
     """Select a random legal action."""
     return random.choice(candidates)
+
+
+def select_action_q_greedy(qnet: SetPoolQNetwork, state: np.ndarray, candidates: list[Combo]) -> Combo:
+    """Select action greedily (argmax Q) for evaluation/opponents."""
+    with torch.no_grad():
+        st = torch.from_numpy(state[np.newaxis, :]).long().to(qnet.device)
+        action_feats = [[combo_to_action_vector(c) for c in candidates]]
+        q_list = qnet(st, action_feats)
+        qvals = q_list[0]
+        idx = int(qvals.argmax().item())
+        return candidates[idx]
+
+
+def select_action_q_epsilon_greedy(
+    qnet: SetPoolQNetwork, state: np.ndarray, candidates: list[Combo], epsilon: float
+) -> tuple[Combo, int]:
+    """Epsilon-greedy w.r.t. argmax Q."""
+    if len(candidates) == 0:
+        candidates = [Combo(PASS, [], ())]
+    if random.random() < epsilon:
+        idx = random.randrange(len(candidates))
+        return candidates[idx], idx
+    with torch.no_grad():
+        st = torch.from_numpy(state[np.newaxis, :]).long().to(qnet.device)
+        action_feats = [[combo_to_action_vector(c) for c in candidates]]
+        q_list = qnet(st, action_feats)
+        qvals = q_list[0]
+        idx = int(qvals.argmax().item())
+        return candidates[idx], idx
 
 
 @dataclass

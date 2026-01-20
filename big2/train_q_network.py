@@ -16,6 +16,8 @@ from big2.simulator.smart_strategy import smart_strategy
 from big2.train_helpers import (
     plot_training_curves,
     random_strategy,
+    select_action_q_epsilon_greedy,
+    select_action_q_greedy,
 )
 
 
@@ -26,35 +28,6 @@ class QStepRecord:
     candidates: list[Combo]
     reward: float
     done: bool = False
-
-
-def select_action_q_greedy(qnet: SetPoolQNetwork, state: np.ndarray, candidates: list[Combo]) -> Combo:
-    """Select action greedily (argmax Q) for evaluation/opponents."""
-    with torch.no_grad():
-        st = torch.from_numpy(state[np.newaxis, :]).long().to(qnet.device)
-        action_feats = [[combo_to_action_vector(c) for c in candidates]]
-        q_list = qnet(st, action_feats)
-        qvals = q_list[0]
-        idx = int(qvals.argmax().item())
-        return candidates[idx]
-
-
-def select_action_q_epsilon_greedy(
-    qnet: SetPoolQNetwork, state: np.ndarray, candidates: list[Combo], epsilon: float
-) -> tuple[Combo, int]:
-    """Epsilon-greedy w.r.t. argmax Q."""
-    if len(candidates) == 0:
-        candidates = [Combo(PASS, [], ())]
-    if random.random() < epsilon:
-        idx = random.randrange(len(candidates))
-        return candidates[idx], idx
-    with torch.no_grad():
-        st = torch.from_numpy(state[np.newaxis, :]).long().to(qnet.device)
-        action_feats = [[combo_to_action_vector(c) for c in candidates]]
-        q_list = qnet(st, action_feats)
-        qvals = q_list[0]
-        idx = int(qvals.argmax().item())
-        return candidates[idx], idx
 
 
 def play_evaluation_game_q(

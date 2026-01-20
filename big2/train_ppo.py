@@ -21,7 +21,8 @@ from big2.train_helpers import (
     plot_training_curves,
     random_strategy,
     safe_categorical_from_logits,
-    select_action_greedy,
+    sample_action_from_policy,
+    select_action_sampled,
     value_of_starting_hand,
 )
 from big2.train_ppo_config import PPOConfig, dump_training_run
@@ -111,7 +112,7 @@ def collect_ppo_trajectories(
                 # Opponent player: use provided strategy
                 strategy = opponent_strategies.get(p, greedy_strategy)
                 if isinstance(strategy, nn.Module):
-                    action = select_action_greedy(strategy, state, candidates)
+                    action = select_action_sampled(strategy, state, candidates)
                 elif strategy == smart_strategy:
                     # Smart strategy needs hand and trick_pile
                     action = strategy(candidates, env.hands[p], env.trick_pile)
@@ -123,16 +124,9 @@ def collect_ppo_trajectories(
             else:
                 # Model player: sample action and store trajectory data
                 # Get policy output
-                st = torch.from_numpy(state[np.newaxis, :]).long().to(device)
-                action_feats = [[combo_to_action_vector(c) for c in candidates]]
-                logits_list, values = policy(st, action_feats)
-                logits = logits_list[0]
-                dist = safe_categorical_from_logits(logits, candidates)
-                idx = dist.sample()
-                old_logprob = dist.log_prob(idx)
-                value = values[0]
-
-                action = candidates[int(idx.item())]
+                idx, action, old_logprob, _entropy, value, _max_prob = sample_action_from_policy(
+                    policy, state, candidates
+                )
                 n_before = len(env.hands[p])
                 next_state, done = env.step(action)
                 n_after = len(env.hands[p])
@@ -150,7 +144,7 @@ def collect_ppo_trajectories(
                 episode_trajs[p].append(
                     PPOStepRecord(
                         state=state.copy(),
-                        action_idx=int(idx.item()),
+                        action_idx=idx,
                         candidates=candidates,
                         old_logprob=old_logprob.detach(),
                         reward=reward,
@@ -299,7 +293,7 @@ def collect_ppo_trajectories_batched(
             if env_idx not in env_actions:  # Not already processed as model player
                 strategy = opponent_strategies_by_env[env_idx].get(p, greedy_strategy)
                 if isinstance(strategy, nn.Module):
-                    action = select_action_greedy(strategy, states[env_idx], candidates)
+                    action = select_action_sampled(strategy, states[env_idx], candidates)
                 elif strategy == smart_strategy:
                     action = strategy(candidates, env.hands[p], env.trick_pile)
                 elif strategy == greedy_strategy or strategy == random_strategy:
