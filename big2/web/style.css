@@ -44,8 +44,10 @@ header h1 {
     border-radius: 10px;
     padding: 40px;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
-    max-width: 500px;
+    max-width: 600px;
     margin: 0 auto;
+    max-height: 85vh;
+    overflow-y: auto;
 }
 
 .setup-form h2 {
@@ -509,7 +511,64 @@ header h1 {
 }
 
 @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Mode Settings */
+.mode-settings {
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 2px solid #eee;
+}
+
+.info-box {
+    background: #e7ecff;
+    border-left: 4px solid #667eea;
+    padding: 12px;
+    margin-bottom: 20px;
+    border-radius: 5px;
+}
+
+.info-box p {
+    margin: 0;
+    color: #555;
+    font-size: 0.9em;
+}
+
+/* Player Configuration */
+.player-config {
+    background: #f8f9fa;
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 15px;
+}
+
+.player-config h4 {
+    margin-bottom: 12px;
+    color: #667eea;
+    font-size: 1em;
+}
+
+.player-config .form-group {
+    margin-bottom: 12px;
+}
+
+.player-config .form-group:last-child {
+    margin-bottom: 0;
+}
+
+.llm-config,
+.nn-config {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #dee2e6;
+}
+
+.player-type-select {
+    font-weight: 600;
 }
 
 /* Responsive */
@@ -534,4 +593,3 @@ header h1 {
         align-items: flex-start;
     }
 }
-

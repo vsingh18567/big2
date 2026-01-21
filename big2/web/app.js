@@ -2,6 +2,7 @@
 let currentGameId = null;
 let selectedCards = [];
 let legalMoves = [];
+let gameMode = "classic"; // "classic" or "llm"
 
 // Card suit and rank mappings
 const SUITS = ["♦", "♣", "♥", "♠"];
@@ -16,7 +17,49 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("play-btn").addEventListener("click", playSelectedCards);
     document.getElementById("pass-btn").addEventListener("click", playPass);
     document.getElementById("clear-selection-btn").addEventListener("click", clearSelection);
+
+    // Mode switching
+    document.getElementById("game-mode").addEventListener("change", handleModeChange);
+
+    // Player type switching for LLM mode
+    for (let i = 2; i <= 4; i++) {
+        document.getElementById(`p${i}-type`).addEventListener("change", (e) => {
+            handlePlayerTypeChange(i, e.target.value);
+        });
+    }
+
+    // Initialize with classic mode visible
+    handleModeChange();
 });
+
+function handleModeChange() {
+    const mode = document.getElementById("game-mode").value;
+    gameMode = mode;
+
+    const classicSettings = document.getElementById("classic-settings");
+    const llmSettings = document.getElementById("llm-settings");
+
+    if (mode === "classic") {
+        classicSettings.classList.remove("hidden");
+        llmSettings.classList.add("hidden");
+    } else {
+        classicSettings.classList.add("hidden");
+        llmSettings.classList.remove("hidden");
+    }
+}
+
+function handlePlayerTypeChange(playerNum, type) {
+    const llmConfig = document.getElementById(`p${playerNum}-llm-config`);
+    const nnConfig = document.getElementById(`p${playerNum}-nn-config`);
+
+    if (type === "llm") {
+        llmConfig.classList.remove("hidden");
+        nnConfig.classList.add("hidden");
+    } else {
+        llmConfig.classList.add("hidden");
+        nnConfig.classList.remove("hidden");
+    }
+}
 
 function showSetup() {
     document.getElementById("game-setup").classList.remove("hidden");
@@ -25,29 +68,71 @@ function showSetup() {
     currentGameId = null;
     selectedCards = [];
     legalMoves = [];
+    handleModeChange();
 }
 
 async function startGame() {
-    const modelPath = document.getElementById("model-path").value.trim() || "models/big2_model.pt";
-    const nPlayers = parseInt(document.getElementById("n-players").value);
-    const device = document.getElementById("device").value;
-
     const startBtn = document.getElementById("start-btn");
     startBtn.disabled = true;
     startBtn.innerHTML = '<span class="loading"></span> Starting...';
 
     try {
-        const response = await fetch("/api/game/start", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-                model_path: modelPath,
-                n_players: nPlayers,
-                device: device,
-            }),
-        });
+        let response;
+
+        if (gameMode === "classic") {
+            // Classic mode - neural network only
+            const modelPath = document.getElementById("model-path").value.trim() || "models/big2_model.pt";
+            const nPlayers = parseInt(document.getElementById("n-players").value);
+            const device = document.getElementById("device").value;
+
+            response = await fetch("/api/game/start", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    model_path: modelPath,
+                    n_players: nPlayers,
+                    device: device,
+                }),
+            });
+        } else {
+            // LLM mode - configurable players
+            const players = [
+                { type: "human" } // Player 1 is always human
+            ];
+
+            // Configure players 2-4
+            for (let i = 2; i <= 4; i++) {
+                const type = document.getElementById(`p${i}-type`).value;
+                const playerConfig = { type };
+
+                if (type === "llm") {
+                    const model = document.getElementById(`p${i}-model`).value;
+                    playerConfig.llm_config = {
+                        model: model,
+                        temperature: 0.7,
+                        max_tokens: 150
+                    };
+                } else if (type === "nn") {
+                    const modelPath = document.getElementById(`p${i}-nn-model`).value.trim() || "big2_model.pt";
+                    playerConfig.nn_config = {
+                        model_path: modelPath,
+                        device: "cpu"
+                    };
+                }
+
+                players.push(playerConfig);
+            }
+
+            response = await fetch("/api/llm-game/start", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ players }),
+            });
+        }
 
         if (!response.ok) {
             const error = await response.json();
@@ -87,7 +172,9 @@ function updateGameDisplay(gameState) {
     // Update game status
     const gameStatus = document.getElementById("game-status");
     if (gameState.done) {
-        gameStatus.textContent = gameState.is_human_winner
+        const humanPlayerId = gameState.human_player_id !== undefined ? gameState.human_player_id : gameState.human_player;
+        const isHumanWinner = gameState.winner === humanPlayerId;
+        gameStatus.textContent = isHumanWinner
             ? "🎉 You Won!"
             : `Player ${gameState.winner} Won`;
         showGameOver(gameState);
@@ -96,21 +183,37 @@ function updateGameDisplay(gameState) {
         gameStatus.textContent = `${gameState.passes_in_row} passes in a row`;
     }
 
-    // Update hand
-    updateHand(gameState.hand, gameState.hand_display, gameState.is_human_turn);
-    document.getElementById("hand-count").textContent = gameState.hand_count;
+    // Update hand - handle both classic and LLM mode formats
+    let hand, handDisplay, handCount;
+    if (gameState.human_hand) {
+        // LLM mode format
+        hand = gameState.human_hand.cards;
+        handDisplay = gameState.human_hand.display;
+        handCount = gameState.human_hand.count;
+    } else {
+        // Classic mode format
+        hand = gameState.hand;
+        handDisplay = gameState.hand_display;
+        handCount = gameState.hand_count;
+    }
+
+    updateHand(hand, handDisplay, gameState.is_human_turn);
+    document.getElementById("hand-count").textContent = handCount;
 
     // Update trick
     updateTrick(gameState.trick);
 
-    // Update opponents
-    updateOpponents(gameState.opponents);
+    // Update opponents - handle both formats
+    const opponents = gameState.opponents || gameState.players?.filter(p =>
+        p.id !== (gameState.human_player_id !== undefined ? gameState.human_player_id : gameState.human_player)
+    ) || [];
+    updateOpponents(opponents);
 
     // Update legal moves
     legalMoves = gameState.legal_moves || [];
     updateLegalMoves(legalMoves);
 
-    // Update bot suggestion
+    // Update bot suggestion (only available in classic mode)
     updateBotSuggestion(gameState.bot_suggestion, gameState.is_human_turn);
 
     // Update buttons
@@ -231,8 +334,21 @@ function updateOpponents(opponents) {
         if (opponent.is_current) {
             oppElement.classList.add("is-current");
         }
+
+        // Get player name and type indicator
+        let playerName = opponent.name || `Player ${opponent.id}`;
+        let typeIcon = "";
+
+        if (gameMode === "llm" && opponent.type) {
+            if (opponent.type === "llm") {
+                typeIcon = " 🤖";
+            } else if (opponent.type === "nn") {
+                typeIcon = " 🧠";
+            }
+        }
+
         oppElement.innerHTML = `
-            <div class="opponent-name">${opponent.name}</div>
+            <div class="opponent-name">${playerName}${typeIcon}</div>
             <div class="opponent-cards">${opponent.cards_left} cards</div>
         `;
         opponentsContainer.appendChild(oppElement);
@@ -324,7 +440,11 @@ async function playMoveByIndex(moveIndex) {
     playBtn.innerHTML = '<span class="loading"></span> Playing...';
 
     try {
-        const response = await fetch(`/api/game/${currentGameId}/action`, {
+        const endpoint = gameMode === "classic"
+            ? `/api/game/${currentGameId}/action`
+            : `/api/llm-game/${currentGameId}/action`;
+
+        const response = await fetch(endpoint, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -359,6 +479,29 @@ async function playMoveByIndex(moveIndex) {
 async function playSelectedCards() {
     if (!currentGameId || selectedCards.length === 0) return;
 
+    // For LLM mode, we need to find the matching move index
+    if (gameMode === "llm") {
+        // Find the legal move that matches selected cards
+        const matchingMoveIndex = legalMoves.findIndex(move => {
+            if (!move.cards) return false;
+            const moveCardsSet = new Set(move.cards);
+            const selectedCardsSet = new Set(selectedCards);
+            if (moveCardsSet.size !== selectedCardsSet.size) return false;
+            for (const card of selectedCardsSet) {
+                if (!moveCardsSet.has(card)) return false;
+            }
+            return true;
+        });
+
+        if (matchingMoveIndex !== -1) {
+            await playMoveByIndex(matchingMoveIndex);
+        } else {
+            alert("Selected cards don't match any legal move");
+        }
+        return;
+    }
+
+    // Classic mode - send cards directly
     const playBtn = document.getElementById("play-btn");
     playBtn.disabled = true;
     playBtn.innerHTML = '<span class="loading"></span> Playing...';
@@ -432,7 +575,10 @@ function showGameOver(gameState) {
     const title = document.getElementById("game-over-title");
     const message = document.getElementById("game-over-message");
 
-    if (gameState.winner === gameState.human_player) {
+    const humanPlayerId = gameState.human_player_id !== undefined ? gameState.human_player_id : gameState.human_player;
+    const isHumanWinner = gameState.winner === humanPlayerId;
+
+    if (isHumanWinner) {
         title.textContent = "🎉 Congratulations!";
         message.textContent = "You won the game!";
     } else {

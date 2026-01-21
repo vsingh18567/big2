@@ -18,26 +18,149 @@
         <div id="game-setup" class="game-setup">
             <div class="setup-form">
                 <h2>Start New Game</h2>
+
+                <!-- Game Mode Selector -->
                 <div class="form-group">
-                    <label for="model-path">Model Path:</label>
-                    <input type="text" id="model-path" value="models/big2_model.pt" placeholder="models/big2_model.pt">
-                </div>
-                <div class="form-group">
-                    <label for="n-players">Number of Players:</label>
-                    <select id="n-players">
-                        <option value="2">2 Players</option>
-                        <option value="3">3 Players</option>
-                        <option value="4" selected>4 Players</option>
+                    <label for="game-mode">Game Mode:</label>
+                    <select id="game-mode">
+                        <option value="classic">Classic AI (Neural Network)</option>
+                        <option value="llm">LLM Mode (AI vs LLM vs Human)</option>
                     </select>
                 </div>
-                <div class="form-group">
-                    <label for="device">Device:</label>
-                    <select id="device">
-                        <option value="auto">Auto (CUDA if available)</option>
-                        <option value="cpu">CPU</option>
-                        <option value="cuda">CUDA</option>
-                    </select>
+
+                <!-- Classic Mode Settings -->
+                <div id="classic-settings" class="mode-settings">
+                    <div class="form-group">
+                        <label for="model-path">Model Path:</label>
+                        <input type="text" id="model-path" value="models/big2_model.pt"
+                            placeholder="models/big2_model.pt">
+                    </div>
+                    <div class="form-group">
+                        <label for="n-players">Number of Players:</label>
+                        <select id="n-players">
+                            <option value="2">2 Players</option>
+                            <option value="3">3 Players</option>
+                            <option value="4" selected>4 Players</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="device">Device:</label>
+                        <select id="device">
+                            <option value="auto">Auto (CUDA if available)</option>
+                            <option value="cpu">CPU</option>
+                            <option value="cuda">CUDA</option>
+                        </select>
+                    </div>
                 </div>
+
+                <!-- LLM Mode Settings -->
+                <div id="llm-settings" class="mode-settings hidden">
+                    <div class="info-box">
+                        <p>Configure 4 players (you + 3 opponents)</p>
+                    </div>
+
+                    <!-- Player 1 (Human) -->
+                    <div class="player-config">
+                        <h4>Player 1 (You)</h4>
+                        <div class="form-group">
+                            <label>Type: Human 👤</label>
+                        </div>
+                    </div>
+
+                    <!-- Player 2 -->
+                    <div class="player-config">
+                        <h4>Player 2</h4>
+                        <div class="form-group">
+                            <label for="p2-type">Type:</label>
+                            <select id="p2-type" class="player-type-select">
+                                <option value="llm">LLM (AI Model) 🤖</option>
+                                <option value="nn">Neural Network 🧠</option>
+                            </select>
+                        </div>
+                        <div class="llm-config" id="p2-llm-config">
+                            <div class="form-group">
+                                <label for="p2-model">Model:</label>
+                                <select id="p2-model">
+                                    <option value="gpt-4o-mini">GPT-4o Mini</option>
+                                    <option value="gpt-4o">GPT-4o</option>
+                                    <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                                    <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
+                                    <option value="gemini/gemini-1.5-flash">Gemini 1.5 Flash</option>
+                                    <option value="gemini/gemini-1.5-pro">Gemini 1.5 Pro</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="nn-config hidden" id="p2-nn-config">
+                            <div class="form-group">
+                                <label for="p2-nn-model">Model Path:</label>
+                                <input type="text" id="p2-nn-model" value="big2_model.pt">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Player 3 -->
+                    <div class="player-config">
+                        <h4>Player 3</h4>
+                        <div class="form-group">
+                            <label for="p3-type">Type:</label>
+                            <select id="p3-type" class="player-type-select">
+                                <option value="llm">LLM (AI Model) 🤖</option>
+                                <option value="nn">Neural Network 🧠</option>
+                            </select>
+                        </div>
+                        <div class="llm-config" id="p3-llm-config">
+                            <div class="form-group">
+                                <label for="p3-model">Model:</label>
+                                <select id="p3-model">
+                                    <option value="gpt-4o-mini">GPT-4o Mini</option>
+                                    <option value="gpt-4o">GPT-4o</option>
+                                    <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                                    <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
+                                    <option value="gemini/gemini-1.5-flash">Gemini 1.5 Flash</option>
+                                    <option value="gemini/gemini-1.5-pro">Gemini 1.5 Pro</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="nn-config hidden" id="p3-nn-config">
+                            <div class="form-group">
+                                <label for="p3-nn-model">Model Path:</label>
+                                <input type="text" id="p3-nn-model" value="big2_model.pt">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Player 4 -->
+                    <div class="player-config">
+                        <h4>Player 4</h4>
+                        <div class="form-group">
+                            <label for="p4-type">Type:</label>
+                            <select id="p4-type" class="player-type-select">
+                                <option value="llm">LLM (AI Model) 🤖</option>
+                                <option value="nn">Neural Network 🧠</option>
+                            </select>
+                        </div>
+                        <div class="llm-config" id="p4-llm-config">
+                            <div class="form-group">
+                                <label for="p4-model">Model:</label>
+                                <select id="p4-model">
+                                    <option value="gpt-4o-mini">GPT-4o Mini</option>
+                                    <option value="gpt-4o">GPT-4o</option>
+                                    <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                                    <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
+                                    <option value="gemini/gemini-1.5-flash">Gemini 1.5 Flash</option>
+                                    <option value="gemini/gemini-1.5-pro">Gemini 1.5 Pro</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="nn-config hidden" id="p4-nn-config">
+                            <div class="form-group">
+                                <label for="p4-nn-model">Model Path:</label>
+                                <input type="text" id="p4-nn-model" value="big2_model.pt">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <button id="start-btn" class="btn btn-primary">Start Game</button>
             </div>
         </div>

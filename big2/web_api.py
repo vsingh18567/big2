@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from torch import nn
 
+from big2.llm_game import GameConfig, GameRunner
 from big2.nn import MLPPolicy, SetPoolPolicy, combo_to_action_vector
 from big2.simulator.cards import PAIR, PASS, SINGLE, TRIPLE, Combo, card_name
 from big2.simulator.env import Big2Env
@@ -359,6 +360,64 @@ async def get_game_status(game_id: str) -> dict[str, Any]:
         "winner": game_state.env.winner,
         "is_human_winner": game_state.env.winner == game_state.human_player if game_state.env.done else None,
     }
+
+
+# ============================================================================
+# LLM Game Endpoints
+# ============================================================================
+
+# Global state: in-memory LLM game storage
+llm_games: dict[str, GameRunner] = {}
+
+
+@app.post("/api/llm-game/start")
+async def start_llm_game(config: GameConfig) -> dict[str, Any]:
+    """Start a new LLM-enabled game with configurable player types."""
+    try:
+        game_id = str(uuid.uuid4())
+        runner = GameRunner(game_id, config)
+        llm_games[game_id] = runner
+        state = runner.start_game()
+        return state
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error starting LLM game: {str(e)}") from e
+
+
+@app.get("/api/llm-game/{game_id}/state")
+async def get_llm_game_state(game_id: str) -> dict[str, Any]:
+    """Get current state of an LLM game."""
+    if game_id not in llm_games:
+        raise HTTPException(status_code=404, detail="Game not found")
+    return llm_games[game_id].get_state()
+
+
+class LLMActionRequest(BaseModel):
+    move_index: int
+
+
+@app.post("/api/llm-game/{game_id}/action")
+async def submit_llm_game_action(game_id: str, action: LLMActionRequest) -> dict[str, Any]:
+    """Submit a human player's action in an LLM game."""
+    if game_id not in llm_games:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    runner = llm_games[game_id]
+
+    try:
+        state = runner.submit_human_action(action.move_index)
+        return state
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing action: {str(e)}") from e
+
+
+@app.get("/api/llm-game/{game_id}/history")
+async def get_llm_game_history(game_id: str) -> dict[str, Any]:
+    """Get full game history for an LLM game."""
+    if game_id not in llm_games:
+        raise HTTPException(status_code=404, detail="Game not found")
+    return {"game_id": game_id, "history": llm_games[game_id].get_history()}
 
 
 # ============================================================================
