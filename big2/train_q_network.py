@@ -35,12 +35,12 @@ def play_evaluation_game_q(
     n_players: int,
     opponent_strategy: Callable[[list[Combo]], Combo] = greedy_strategy,
     epsilon: float = 0.0,
-) -> tuple[int | None, int, int]:
+) -> tuple[int | None, int, int, int]:
     """
     Play one evaluation game where player 0 uses greedy-Q, others use opponent_strategy.
 
     Returns:
-        (winner, starting_position, cards_remaining_for_player_0)
+        (winner, starting_position, cards_remaining_for_player_0, score_for_player_0)
     """
     env = Big2Env(n_players)
     _ = env.reset()
@@ -63,8 +63,13 @@ def play_evaluation_game_q(
                 action = opponent_strategy(candidates)
         _, _done = env.step(action)
 
-    cards_remaining = len(env.hands[0]) if env.winner != 0 else 0
-    return env.winner, starting_position, cards_remaining
+    if env.winner == 0:
+        score = sum(len(env.hands[p]) for p in range(n_players) if p != 0)
+        cards_remaining = 0
+    else:
+        cards_remaining = len(env.hands[0])
+        score = -cards_remaining
+    return env.winner, starting_position, cards_remaining, score
 
 
 def evaluate_against_greedy_q(current_qnet: SetPoolQNetwork, n_players: int, num_games: int = 500, device: str = "cpu"):
@@ -74,11 +79,14 @@ def evaluate_against_greedy_q(current_qnet: SetPoolQNetwork, n_players: int, num
     wins_vs_smart = 0
     cards_remaining_sum = 0
     losses_count = 0
+    score_sum_greedy = 0
+    score_sum_random = 0
+    score_sum_smart = 0
     wins_by_position: dict[int, int] = {}
     games_by_position: dict[int, int] = {}
 
     for _ in range(num_games):
-        winner, starting_pos, cards_remaining = play_evaluation_game_q(
+        winner, starting_pos, cards_remaining, score = play_evaluation_game_q(
             current_qnet, n_players, opponent_strategy=greedy_strategy, epsilon=0.0
         )
         if winner == 0:
@@ -87,29 +95,42 @@ def evaluate_against_greedy_q(current_qnet: SetPoolQNetwork, n_players: int, num
         else:
             cards_remaining_sum += cards_remaining
             losses_count += 1
+        score_sum_greedy += score
         games_by_position[starting_pos] = games_by_position.get(starting_pos, 0) + 1
 
     for _ in range(num_games):
-        winner, _, _ = play_evaluation_game_q(current_qnet, n_players, opponent_strategy=random_strategy, epsilon=0.0)
+        winner, _, _, score = play_evaluation_game_q(
+            current_qnet, n_players, opponent_strategy=random_strategy, epsilon=0.0
+        )
         if winner == 0:
             wins_vs_random += 1
+        score_sum_random += score
 
     for _ in range(num_games):
-        winner, _, _ = play_evaluation_game_q(current_qnet, n_players, opponent_strategy=smart_strategy, epsilon=0.0)
+        winner, _, _, score = play_evaluation_game_q(
+            current_qnet, n_players, opponent_strategy=smart_strategy, epsilon=0.0
+        )
         if winner == 0:
             wins_vs_smart += 1
+        score_sum_smart += score
 
     win_rate_vs_greedy = wins_vs_greedy / num_games
     win_rate_vs_random = wins_vs_random / num_games
     win_rate_vs_smart = wins_vs_smart / num_games
     avg_cards_remaining = cards_remaining_sum / losses_count if losses_count > 0 else 0.0
     win_rate_by_position = {pos: wins_by_position.get(pos, 0) / games_by_position[pos] for pos in games_by_position}
+    avg_score_vs_greedy = score_sum_greedy / num_games
+    avg_score_vs_random = score_sum_random / num_games
+    avg_score_vs_smart = score_sum_smart / num_games
 
     return {
         "win_rate_vs_greedy": win_rate_vs_greedy,
         "win_rate_vs_random": win_rate_vs_random,
         "win_rate_vs_smart": win_rate_vs_smart,
         "avg_cards_remaining_when_losing": avg_cards_remaining,
+        "avg_score_vs_greedy": avg_score_vs_greedy,
+        "avg_score_vs_random": avg_score_vs_random,
+        "avg_score_vs_smart": avg_score_vs_smart,
         "win_rate_by_starting_position": win_rate_by_position,
         "total_games": num_games,
     }
@@ -451,10 +472,13 @@ def train_q_network(
             wr_str += f" ({wins_vs_greedy}/{metrics['total_games']} wins)"
             print(wr_str)
             print(f"  Win rate vs random: {metrics['win_rate_vs_random']:.2%}")
+            print(f"  Avg score vs greedy: {metrics['avg_score_vs_greedy']:.2f}")
+            print(f"  Avg score vs random: {metrics['avg_score_vs_random']:.2f}")
             wins_vs_smart = int(metrics["win_rate_vs_smart"] * metrics["total_games"])
             wr_smart_str = f"  Win rate vs smart: {metrics['win_rate_vs_smart']:.2%}"
             wr_smart_str += f" ({wins_vs_smart}/{metrics['total_games']} wins)"
             print(wr_smart_str)
+            print(f"  Avg score vs smart: {metrics['avg_score_vs_smart']:.2f}")
             print(f"  Avg cards remaining when losing: {metrics['avg_cards_remaining_when_losing']:.2f}")
             print("  Win rate by starting position:")
             for pos, wr in sorted(metrics["win_rate_by_starting_position"].items()):

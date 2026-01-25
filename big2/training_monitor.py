@@ -32,6 +32,9 @@ class TrainingStats:
     win_rates_smart: list[float] = field(default_factory=list)
     win_rates_random: list[float] = field(default_factory=list)
     avg_cards_remaining: list[float] = field(default_factory=list)
+    avg_scores_greedy: list[float] = field(default_factory=list)
+    avg_scores_random: list[float] = field(default_factory=list)
+    avg_scores_smart: list[float] = field(default_factory=list)
 
     # Current training state
     current_lr: float = 0.0
@@ -128,6 +131,9 @@ class TrainingMonitor:
         win_rate_smart: float,
         win_rate_random: float | None = None,
         avg_cards_remaining: float | None = None,
+        avg_score_greedy: float | None = None,
+        avg_score_random: float | None = None,
+        avg_score_smart: float | None = None,
     ):
         """Called after each evaluation."""
         with self._lock:
@@ -138,6 +144,12 @@ class TrainingMonitor:
                 self.stats.win_rates_random.append(win_rate_random)
             if avg_cards_remaining is not None:
                 self.stats.avg_cards_remaining.append(avg_cards_remaining)
+            if avg_score_greedy is not None:
+                self.stats.avg_scores_greedy.append(avg_score_greedy)
+            if avg_score_random is not None:
+                self.stats.avg_scores_random.append(avg_score_random)
+            if avg_score_smart is not None:
+                self.stats.avg_scores_smart.append(avg_score_smart)
             self._dirty = True
 
         self._write_stats(force=True)

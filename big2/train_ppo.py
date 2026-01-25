@@ -804,6 +804,9 @@ def train_ppo(
                     win_rate_smart=metrics.win_rate_vs_smart,
                     win_rate_random=metrics.win_rate_vs_random,
                     avg_cards_remaining=metrics.avg_cards_remaining_when_losing,
+                    avg_score_greedy=metrics.avg_score_vs_greedy,
+                    avg_score_random=metrics.avg_score_vs_random,
+                    avg_score_smart=metrics.avg_score_vs_smart,
                 )
                 # Update curriculum state
                 ema_greedy = checkpoint_manager.ema_win_rate_greedy or 0.0
@@ -826,10 +829,13 @@ def train_ppo(
             wr_str += f" ({wins_vs_greedy}/{metrics.total_games} wins)"
             print(wr_str)
             print(f"  Win rate vs random: {metrics.win_rate_vs_random:.2%}")
+            print(f"  Avg score vs greedy: {metrics.avg_score_vs_greedy:.2f}")
+            print(f"  Avg score vs random: {metrics.avg_score_vs_random:.2f}")
             wins_vs_smart = int(metrics.win_rate_vs_smart * metrics.total_games)
             wr_smart_str = f"  Win rate vs smart: {metrics.win_rate_vs_smart:.2%}"
             wr_smart_str += f" ({wins_vs_smart}/{metrics.total_games} wins)"
             print(wr_smart_str)
+            print(f"  Avg score vs smart: {metrics.avg_score_vs_smart:.2f}")
             print(f"  Avg cards remaining when losing: {metrics.avg_cards_remaining_when_losing:.2f}")
             print("  Win rate by starting position:")
             for pos, wr in sorted(metrics.win_rate_by_starting_position.items()):
