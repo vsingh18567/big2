@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from pydantic import BaseModel, Field, field_validator, model_validator
 from torch import nn
-
+import os
 from big2.nn import combo_to_action_vector
 from big2.simulator.cards import (
     FLUSH,
@@ -121,6 +121,7 @@ class LLMPlayer(Player):
         self.config = config
         self.messages: list[dict[str, str]] = []
         self._initialize_system_prompt()
+        self.total_cost = 0.0
 
     def _initialize_system_prompt(self) -> None:
         """Set up the system prompt explaining Big 2 rules."""
@@ -216,6 +217,8 @@ When given your hand and legal moves, respond with ONLY the move number (e.g., "
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
             )
+            cost = litellm.completion_cost(completion_response=response)
+            self.total_cost += float(cost) 
 
             assistant_message = response.choices[0].message.content.strip()
             self.messages.append({"role": "assistant", "content": assistant_message})
@@ -270,8 +273,10 @@ class NNPlayer(Player):
         model_path = self.config.model_path
         if not Path(model_path).is_absolute():
             # Try relative to big2 directory
+            print(f"Loading model from {model_path}")
             base_dir = Path(__file__).parent
-            model_path = str(base_dir / model_path)
+            model_path = os.path.join(base_dir, model_path)
+            print(f"Loading model from {model_path}")
 
         device = self.config.device
         if device == "auto":
@@ -372,6 +377,7 @@ class GameRunner:
         self.state = self.env.reset()
         # Play until human's turn or game ends
         self._play_until_human_or_done()
+        print(f"Total cost: {sum(player.total_cost if hasattr(player, 'total_cost') else 0.0 for player in self.players)}")
         return self.get_state()
 
     def _get_game_context(self, player_id: int) -> dict[str, Any]:

@@ -472,16 +472,52 @@ class DotProductScorer(nn.Module):
 
 
 class ValueHead(nn.Module):
-    """State value head V(s)."""
-
-    def __init__(self, *, in_dim: int, hidden: int, activation: Literal["relu", "gelu"] = "relu"):
+    """State value head V(s) with deeper architecture for stable value estimation."""
+    def __init__(
+        self, 
+        *, 
+        in_dim: int, 
+        hidden: int, 
+        activation: Literal["relu", "gelu"] = "relu",
+        num_layers: int = 3,
+        dropout: float = 0.1
+    ):
         super().__init__()
-        act = "relu" if activation == "relu" else "gelu"
-        self.net = MLP(in_dim, [hidden, hidden // 2], activation=act, dropout=0.0, out_dim=1)
-
+        act = nn.ReLU() if activation == "relu" else nn.GELU()
+        
+        # Build deeper network with residual-friendly architecture
+        layers = []
+        current_dim = in_dim
+        
+        # First layer: expand or maintain dimension
+        layers.extend([
+            nn.Linear(current_dim, hidden),
+            nn.LayerNorm(hidden),
+            act,
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        ])
+        current_dim = hidden
+        
+        # Middle layers: maintain hidden dimension for stability
+        for _ in range(num_layers - 2):
+            layers.extend([
+                nn.Linear(current_dim, hidden),
+                nn.LayerNorm(hidden),
+                act,
+                nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+            ])
+        
+        # Final projection to value
+        layers.append(nn.Linear(hidden, 1))
+        
+        self.net = nn.Sequential(*layers)
+        
+        # Initialize final layer with smaller weights for stability
+        nn.init.orthogonal_(self.net[-1].weight, gain=0.01)
+        nn.init.constant_(self.net[-1].bias, 0.0)
+    
     def forward(self, state_h: torch.Tensor) -> torch.Tensor:
         return self.net(state_h).squeeze(-1)
-
 
 class CandidateScoringMixin:
     """
@@ -540,8 +576,13 @@ class MLPPolicy(nn.Module, CandidateScoringMixin):
         self.policy_scorer = ConcatScalarHead(
             state_dim=hidden, action_dim=action_hidden, hidden=hidden, activation="relu", dropout=DROPOUT_RATE
         )
-        self.value_head = ValueHead(in_dim=hidden, hidden=hidden, activation="relu")
-
+        self.value_head = ValueHead(
+            in_dim=768  , 
+            hidden=768, 
+            activation="gelu",
+            num_layers=3,  # Try 3-4
+            dropout=0.1
+        )
         # Legacy attribute aliases (kept for backward compatibility / introspection tooling).
         # Prefer using the modular components above in new code.
         self.card_emb = self.state_encoder.card_emb
@@ -678,7 +719,13 @@ class SetPoolPolicy(nn.Module, CandidateScoringMixin):
         )
         self.action_encoder = ActionEncoder(hidden=action_hidden, activation="gelu", dropout=DROPOUT_RATE)
         self.policy_scorer = DotProductScorer(state_dim=hidden, action_dim=action_hidden, scale=True)
-        self.value_head = ValueHead(in_dim=hidden, hidden=hidden, activation="gelu")
+        self.value_head = ValueHead(
+            in_dim=hidden,
+            hidden=hidden,  
+            activation="gelu",
+            num_layers=3,  
+            dropout=0.1
+        )
 
     def forward_state(self, state_tensor: torch.Tensor) -> torch.Tensor:
         return self.state_encoder(state_tensor)

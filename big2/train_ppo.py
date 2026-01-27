@@ -79,9 +79,9 @@ def collect_ppo_trajectories(
     model_seats_by_episode: list[list[int]],
     device: str,
     *,
-    step_penalty: float = -0.001,
-    progress_reward_coef: float = 0.01,
-    pass_penalty: float = -0.001,
+    step_penalty: float = -0.0001,
+    progress_reward_coef: float = 0.001,
+    pass_penalty: float = 0,
 ) -> dict[int, list[PPOStepRecord]]:
     """
     Collect trajectories for PPO training.
@@ -160,13 +160,16 @@ def collect_ppo_trajectories(
                 for model_seat in model_seats:
                     if len(episode_trajs[model_seat]) > 0:
                         if model_seat == winner:
-                            final_r = 1.0
+                            MAX_CARDS = 52 // env.n_players
+                            opp_frac = sum(
+                                len(env.hands[i]) for i in range(env.n_players) if i != model_seat
+                            ) / (MAX_CARDS * (env.n_players - 1))
+                            final_r = 1.0 + opp_frac
                         else:
                             # Scale terminal loss by remaining cards, but clamp to -1 once you're
                             # above half a starting hand. (In 4p: cards_per_player=13, half=6.5.)
-                            cards_per_player = 52 // env.n_players
-                            half_hand = cards_per_player / 2
-                            final_r = -min(1.0, len(env.hands[model_seat]) / half_hand)
+                            cards_left_frac = len(env.hands[q]) / (52 // env.n_players)
+                            final_r = -1.0 - cards_left_frac
                         # Add terminal reward on top of intermediate step penalty
                         episode_trajs[model_seat][-1].reward += final_r
                         episode_trajs[model_seat][-1].done = True
@@ -187,9 +190,9 @@ def collect_ppo_trajectories_batched(
     model_seats_by_env: list[list[int]],
     device: str,
     *,
-    step_penalty: float = -0.001,
-    progress_reward_coef: float = 0.05,
-    pass_penalty: float = -0.005,
+    step_penalty: float = -0.0001,
+    progress_reward_coef: float = 0,
+    pass_penalty: float = 0,
 ) -> dict[int, list[PPOStepRecord]]:
     """
     Collect trajectories for PPO training with batched forward passes.
@@ -331,19 +334,34 @@ def collect_ppo_trajectories_batched(
                     episode_trajs[env_idx][actor][-1].reward = shaped
 
             if done:
-                # Assign terminal rewards
                 winner = env.winner
-                for q in model_seats_by_env[env_idx]:
-                    if len(episode_trajs[env_idx][q]) > 0:
-                        if q == winner:
-                            final_r = 1.0
-                        else:
-                            final_r = -len(env.hands[q]) / (52 // env.n_players)
-                        # Add terminal reward on top of intermediate step penalty
-                        episode_trajs[env_idx][q][-1].reward += final_r
-                        episode_trajs[env_idx][q][-1].done = True
-                        # Append to full trajectories
-                        trajectories[q].extend(episode_trajs[env_idx][q])
+                model_seats = model_seats_by_env[env_idx]
+                
+                # 1. Calculate the 'pot' of penalties from losers
+                # Using a standard Big 2 linear penalty (1 point per card)
+                total_penalty_pot = 0.0
+                cards_per_player = 52 // env.n_players
+                
+                for q in range(env.n_players):
+                    if q != winner:
+                        cards_left = len(env.hands[q])
+                        # Normalize penalty to keep the scale near [-1, 1]
+                        # e.g., Losing with all 13 cards = -1.0
+                        penalty = cards_left / cards_per_player
+                        
+                        # If the loser is a model-controlled seat, assign its reward
+                        if q in model_seats and len(episode_trajs[env_idx][q]) > 0:
+                            episode_trajs[env_idx][q][-1].reward = -penalty
+                            episode_trajs[env_idx][q][-1].done = True
+                            trajectories[q].extend(episode_trajs[env_idx][q])
+
+                        total_penalty_pot += penalty
+
+                # 2. Assign the accumulated pot to the winner
+                if winner in model_seats and len(episode_trajs[env_idx][winner]) > 0:
+                    episode_trajs[env_idx][winner][-1].reward = total_penalty_pot
+                    episode_trajs[env_idx][winner][-1].done = True
+                    trajectories[winner].extend(episode_trajs[env_idx][winner])
             else:
                 states[env_idx] = next_state
                 next_active_envs.append(env_idx)
@@ -741,14 +759,14 @@ def train_ppo(
 
         # Step the learning rate scheduler
         scheduler.step()
-
-        # Adaptive entropy coefficient: adjust based on current entropy
-        if entropy < target_entropy - 0.15:
-            # Entropy too low, encourage more exploration
-            current_entropy_beta = min(config.entropy_beta_max, current_entropy_beta * 1.01)
-        elif entropy > target_entropy + 0.15:
-            # Entropy too high, allow more exploitation
-            current_entropy_beta = max(config.entropy_beta_min, current_entropy_beta * 0.99)
+        if batch / config.batches >= 0.3:
+            # Adaptive entropy coefficient: adjust based on current entropy
+            if entropy < target_entropy - 0.15:
+                # Entropy too low, encourage more exploration
+                current_entropy_beta = min(config.entropy_beta_max, current_entropy_beta * 1.01)
+            elif entropy > target_entropy + 0.15:
+                # Entropy too high, allow more exploitation
+                current_entropy_beta = max(config.entropy_beta_min, current_entropy_beta * 0.99)
 
         # Record losses
         loss_history.append(total_loss)
@@ -774,6 +792,7 @@ def train_ppo(
 
         # Evaluation every eval_interval batches
         if batch % config.eval_interval == 0:
+            print("LAMBDA: ", config.lam)
             total_steps = sum(len(v) for v in trajectories.values())
             avg_steps_per_episode = total_steps / config.episodes_per_batch if config.episodes_per_batch > 0 else 0.0
 
@@ -900,20 +919,20 @@ if __name__ == "__main__":
     config = PPOConfig(
         n_players=n_players,
         model_seat_count=1,
-        batches=10000,
-        episodes_per_batch=64,
-        ppo_epochs=4,
+        batches=5000,
+        episodes_per_batch=128,
+        ppo_epochs=2,
         clip_epsilon=0.2,
         lr=1e-4,
         entropy_beta=0.05,
         value_coef=0.5,
         gamma=0.99,
-        lam=0.95,
+        lam=1,
         seed=42,
         device=device,
         eval_interval=100,
         eval_games=250,
-        mini_batch_size=512,
+        mini_batch_size=128,
         policy_arch="setpool",
     )
 

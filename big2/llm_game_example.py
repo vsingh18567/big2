@@ -13,9 +13,9 @@ def example_2_llm_vs_2_nn():
     config = GameConfig(
         players=[
             PlayerConfig(type="llm", llm_config=LLMConfig(model="claude-sonnet-4-5-20250929", temperature=0.8)),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="models/big2_model_step_100.pt", device="cpu")),
+            PlayerConfig(type="nn", nn_config=NNConfig(model_path="../models/big2_model_step_400.pt", device="cpu")),
             PlayerConfig(type="llm", llm_config=LLMConfig(model="claude-sonnet-4-5-20250929", temperature=0.8)),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="models/big2_model_step_100.pt", device="cpu")),
+            PlayerConfig(type="nn", nn_config=NNConfig(model_path="../models/big2_model_step_400.pt", device="cpu")),
         ]
     )
 
@@ -90,9 +90,9 @@ def run_single_game(game_id: int) -> dict:
     config = GameConfig(
         players=[
             PlayerConfig(type="llm", llm_config=LLMConfig(model="claude-sonnet-4-5-20250929", temperature=0.8)),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="models/big2_model_step_100.pt", device="cpu")),
+            PlayerConfig(type="nn", nn_config=NNConfig(model_path="../models/big2_model_step_400.pt", device="cpu")),
             PlayerConfig(type="llm", llm_config=LLMConfig(model="claude-sonnet-4-5-20250929", temperature=0.8)),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="models/big2_model_step_100.pt", device="cpu")),
+            PlayerConfig(type="nn", nn_config=NNConfig(model_path="../models/big2_model_step_400.pt", device="cpu")),
         ]
     )
 
@@ -161,7 +161,7 @@ def run_multiple_games(num_games: int = 20, concurrency: int = 3):
 
 if __name__ == "__main__":
     # Run multiple games with multithreading
-    run_multiple_games(num_games=20, concurrency=3)
+    run_multiple_games(num_games=100, concurrency=5)
 
     # Single game examples (commented out)
     # print("=" * 60)
