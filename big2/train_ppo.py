@@ -349,17 +349,17 @@ def collect_ppo_trajectories_batched(
                         # e.g., Losing with all 13 cards = -1.0
                         penalty = cards_left / cards_per_player
                         
-                        # If the loser is a model-controlled seat, assign its reward
+                        # If the loser is a model-controlled seat, add terminal penalty to shaped reward
                         if q in model_seats and len(episode_trajs[env_idx][q]) > 0:
-                            episode_trajs[env_idx][q][-1].reward = -penalty
+                            episode_trajs[env_idx][q][-1].reward -= penalty
                             episode_trajs[env_idx][q][-1].done = True
                             trajectories[q].extend(episode_trajs[env_idx][q])
 
                         total_penalty_pot += penalty
 
-                # 2. Assign the accumulated pot to the winner
+                # 2. Add the accumulated pot to the winner's shaped reward
                 if winner in model_seats and len(episode_trajs[env_idx][winner]) > 0:
-                    episode_trajs[env_idx][winner][-1].reward = total_penalty_pot
+                    episode_trajs[env_idx][winner][-1].reward += total_penalty_pot
                     episode_trajs[env_idx][winner][-1].done = True
                     trajectories[winner].extend(episode_trajs[env_idx][winner])
             else:
@@ -717,6 +717,8 @@ def train_ppo(
                 opp_map[p] = checkpoint_manager.sample_opponent_policy(policy)
             opponent_strategies_by_env.append(opp_map)
 
+        # Disable dropout during rollout collection for stable old_logprobs
+        policy.eval()
         if config.use_batched_collection:
             trajectories = collect_ppo_trajectories_batched(
                 config.n_players,
@@ -741,6 +743,8 @@ def train_ppo(
                 progress_reward_coef=config.progress_reward_coef,
                 pass_penalty=config.pass_penalty,
             )
+        # Re-enable dropout for PPO update
+        policy.train()
 
         # PPO update
         policy_loss, value_loss, entropy, total_loss = ppo_update(
@@ -923,15 +927,15 @@ if __name__ == "__main__":
         episodes_per_batch=128,
         ppo_epochs=2,
         clip_epsilon=0.2,
-        lr=1e-4,
+        lr=3e-5,
         entropy_beta=0.05,
         value_coef=0.5,
         gamma=0.99,
-        lam=1,
+        lam=0.95,
         seed=42,
         device=device,
         eval_interval=100,
-        eval_games=250,
+        eval_games=500,
         mini_batch_size=128,
         policy_arch="setpool",
     )

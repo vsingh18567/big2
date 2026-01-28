@@ -8,91 +8,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from big2.llm_game import GameConfig, GameRunner, LLMConfig, NNConfig, PlayerConfig
 
 
-def example_2_llm_vs_2_nn():
-    """Example: 2 LLM players vs 2 neural network players."""
-    config = GameConfig(
-        players=[
-            PlayerConfig(type="llm", llm_config=LLMConfig(model="claude-sonnet-4-5-20250929", temperature=0.8)),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="../models/big2_model_step_400.pt", device="cpu")),
-            PlayerConfig(type="llm", llm_config=LLMConfig(model="claude-sonnet-4-5-20250929", temperature=0.8)),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="../models/big2_model_step_400.pt", device="cpu")),
-        ]
-    )
-
-    runner = GameRunner("example-game-1", config)
-    state = runner.start_game()
-    print(f"Game started. Done: {state['done']}, Winner: {state['winner']}, 'Players': {state['players']}")
-    return runner
-
-
-def example_human_vs_3_llm():
-    """Example: 1 human player vs 3 LLM players."""
-    config = GameConfig(
-        players=[
-            PlayerConfig(type="human"),
-            PlayerConfig(type="llm", llm_config=LLMConfig(model="gpt-4o-mini")),
-            PlayerConfig(type="llm", llm_config=LLMConfig(model="gpt-4o-mini")),
-            PlayerConfig(type="llm", llm_config=LLMConfig(model="gpt-4o-mini")),
-        ]
-    )
-
-    runner = GameRunner("example-game-2", config)
-    state = runner.start_game()
-
-    print(f"Human hand: {state['human_hand']['display']}")
-    print(f"Is human turn: {state['is_human_turn']}")
-
-    if state["is_human_turn"] and state["legal_moves"]:
-        print("\nLegal moves:")
-        for i, move in enumerate(state["legal_moves"]):
-            print(f"{i}: {move['type_name']} - {move['display']}")
-
-    return runner
-
-
-def example_all_nn():
-    """Example: 4 neural network players (for benchmarking)."""
-    config = GameConfig(
-        players=[
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="big2_model.pt")),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="big2_model.pt")),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="big2_model.pt")),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="big2_model.pt")),
-        ]
-    )
-
-    runner = GameRunner("example-game-3", config)
-    state = runner.start_game()
-    print(f"Game finished. Winner: Player {state['winner']}")
-    print(f"Game history length: {len(runner.get_history())}")
-    return runner
-
-
-def example_mixed_llm_providers():
-    """Example: Different LLM providers playing together."""
-    config = GameConfig(
-        players=[
-            PlayerConfig(type="llm", llm_config=LLMConfig(model="gpt-4o-mini", temperature=0.7)),
-            PlayerConfig(type="llm", llm_config=LLMConfig(model="claude-3-haiku-20240307", temperature=0.7)),
-            PlayerConfig(type="llm", llm_config=LLMConfig(model="gemini/gemini-1.5-flash", temperature=0.7)),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="big2_model.pt")),
-        ]
-    )
-
-    runner = GameRunner("example-game-4", config)
-    state = runner.start_game()
-    print(f"Mixed LLM game complete. Winner: Player {state['winner']}")
-    return runner
-
-
 def run_single_game(game_id: int) -> dict:
     """Run a single game and return the results."""
     config = GameConfig(
         players=[
             PlayerConfig(type="llm", llm_config=LLMConfig(model="claude-sonnet-4-5-20250929", temperature=0.8)),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="../models/big2_model_step_400.pt", device="cpu")),
-            PlayerConfig(type="llm", llm_config=LLMConfig(model="claude-sonnet-4-5-20250929", temperature=0.8)),
-            PlayerConfig(type="nn", nn_config=NNConfig(model_path="../models/big2_model_step_400.pt", device="cpu")),
+            PlayerConfig(type="nn", nn_config=NNConfig(model_path="models/big2_model_step_300.pt", device="cpu")),
+            PlayerConfig(type="llm", llm_config=LLMConfig(model="gpt-5.2", temperature=0.8)),
+            PlayerConfig(type="nn", nn_config=NNConfig(model_path="models/big2_model_step_300.pt", device="cpu")),
         ]
     )
 

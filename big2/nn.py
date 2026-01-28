@@ -610,6 +610,54 @@ class MLPPolicy(nn.Module, CandidateScoringMixin):
         values = self.value_head(state_h)  # (B,)
         return logits_list, values
 
+class SetAttentionBlock(nn.Module):
+    """
+    Self-attention block for unordered sets.
+    Input:  (B, N, D)
+    Output: (B, N, D)
+    """
+    def __init__(self, dim, num_heads=4, dropout=0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.ln1 = nn.LayerNorm(dim)
+        self.ff = nn.Sequential(
+            nn.Linear(dim, 4 * dim),
+            nn.GELU(),
+            nn.Linear(4 * dim, dim),
+            nn.Dropout(dropout),
+        )
+        self.ln2 = nn.LayerNorm(dim)
+
+    def forward(self, x, mask=None):
+        """
+        x:    (B, N, D)
+        mask: (B, N)  True = keep, False = pad
+        """
+        # Pre-LN attention
+        h = self.ln1(x)
+
+        attn_mask = None
+        key_padding_mask = None
+        if mask is not None:
+            # MultiheadAttention expects True = pad
+            key_padding_mask = ~mask
+
+        attn_out, _ = self.attn(
+            h, h, h,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
+        x = x + attn_out
+
+        # Feedforward
+        x = x + self.ff(self.ln2(x))
+        return x
+
 
 class SetPoolStateEncoder(nn.Module):
     """State encoder used by `SetPoolPolicy` (order-invariant pooling + shared embedding for 52-d sets)."""
@@ -630,6 +678,12 @@ class SetPoolStateEncoder(nn.Module):
         self.card_emb = nn.Embedding(card_vocab, card_emb_dim)
 
         self.hand_enc = nn.Sequential(nn.Linear(card_emb_dim, hidden), nn.GELU(), nn.Dropout(DROPOUT_RATE))
+        self.hand_set_attn = SetAttentionBlock(
+            dim=card_emb_dim,
+            num_heads=4,
+            dropout=DROPOUT_RATE,
+        )
+
         self.set52_enc = nn.Sequential(nn.Linear(card_emb_dim, hidden), nn.GELU(), nn.Dropout(DROPOUT_RATE))
         self.counts_enc = nn.Sequential(nn.Linear(n_players - 1, hidden), nn.GELU(), nn.Dropout(DROPOUT_RATE))
         self.passes_enc = nn.Sequential(nn.Linear(1, hidden), nn.GELU(), nn.Dropout(DROPOUT_RATE))
@@ -637,6 +691,8 @@ class SetPoolStateEncoder(nn.Module):
 
         state_in = hidden * (1 + 1 + 1 + 1 + (n_players - 1))  # hand, last_play, seen, passes, opponents
         state_in += hidden  # counts
+
+
         self.state_proj = nn.Linear(state_in, hidden)
         self.state_ln = nn.LayerNorm(hidden)
         self.state_ff = nn.Sequential(
@@ -667,9 +723,10 @@ class SetPoolStateEncoder(nn.Module):
 
         hand_ids[hand_ids < 0] = self.pad_id
         hand_mask = hand_ids != self.pad_id
-        hand_emb = self.card_emb(hand_ids.long())  # (B,N,E)
-        hand_pool = _pool_card_embeddings(hand_emb, hand_mask)  # (B,E)
-        hand_h = self.hand_enc(hand_pool)  # (B,H)
+        hand_emb = self.card_emb(hand_ids)          # (B, N, E)
+        hand_emb = self.hand_set_attn(hand_emb, hand_mask)
+        hand_pool = _pool_card_embeddings(hand_emb, hand_mask)
+        hand_h = self.hand_enc(hand_pool)
 
         lp_pool = self._encode_onehot52(last_play)
         sn_pool = self._encode_onehot52(seen)
