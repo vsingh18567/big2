@@ -13,7 +13,7 @@ body {
 }
 
 .container {
-    max-width: 1200px;
+    max-width: 1400px;
     margin: 0 auto;
 }
 
@@ -121,8 +121,17 @@ header h1 {
 .game-area {
     background: white;
     border-radius: 10px;
-    padding: 30px;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    display: flex;
+    flex-wrap: nowrap;
+    overflow: hidden;
+}
+
+.game-main {
+    flex: 1 1 0%;
+    padding: 30px;
+    min-width: 0;
+    overflow-y: auto;
 }
 
 .game-header {
@@ -230,18 +239,48 @@ header h1 {
 /* Bot Suggestion */
 .bot-suggestion-area {
     margin-bottom: 30px;
-    padding: 20px;
     background: #fff3cd;
     border: 2px solid #ffc107;
     border-radius: 8px;
+    overflow: hidden;
 }
 
-.bot-suggestion-area h3 {
-    margin-bottom: 15px;
+.bot-suggestion-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.bot-suggestion-header:hover {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.bot-suggestion-header h3 {
+    margin: 0;
     color: #856404;
+    font-size: 1em;
+}
+
+.collapse-indicator {
+    font-size: 1.2em;
+    font-weight: bold;
+    color: #856404;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.bot-suggestion-area.collapsed .bot-suggestion {
+    display: none;
 }
 
 .bot-suggestion {
+    padding: 0 20px 20px 20px;
     min-height: 60px;
 }
 
@@ -571,6 +610,191 @@ header h1 {
     font-weight: 600;
 }
 
+/* Play History Sidebar */
+.play-history-sidebar {
+    width: 280px;
+    flex-shrink: 0;
+    background: linear-gradient(180deg, #1e1e2e 0%, #2d2d44 100%);
+    border-left: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    flex-direction: column;
+    transition: width 0.3s ease, opacity 0.3s ease;
+    overflow: hidden;
+}
+
+.play-history-sidebar.collapsed {
+    width: 48px;
+}
+
+.play-history-sidebar.collapsed .sidebar-header h3,
+.play-history-sidebar.collapsed .play-history-list {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.2);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.sidebar-header h3 {
+    color: #e0e0ff;
+    font-size: 0.95em;
+    font-weight: 600;
+    margin: 0;
+    white-space: nowrap;
+    transition: opacity 0.2s ease;
+}
+
+.sidebar-toggle {
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: rgba(255, 255, 255, 0.1);
+    color: #e0e0ff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    transition: background 0.2s ease;
+    flex-shrink: 0;
+}
+
+.sidebar-toggle:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.play-history-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    transition: opacity 0.2s ease;
+}
+
+.empty-history {
+    color: #888;
+    font-style: italic;
+    text-align: center;
+    padding: 20px;
+    font-size: 0.9em;
+}
+
+/* History Entry */
+.history-entry {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    border-left: 3px solid #667eea;
+    transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.history-entry:hover {
+    background: rgba(255, 255, 255, 0.08);
+    transform: translateX(2px);
+}
+
+.history-entry.player-human {
+    border-left-color: #4ade80;
+}
+
+.history-entry.player-ai {
+    border-left-color: #f472b6;
+}
+
+.history-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.history-player {
+    font-weight: 700;
+    font-size: 0.85em;
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+.history-player.player-human {
+    background: rgba(74, 222, 128, 0.2);
+    color: #4ade80;
+}
+
+.history-player.player-ai {
+    background: rgba(244, 114, 182, 0.2);
+    color: #f472b6;
+}
+
+.history-round {
+    color: #666;
+    font-size: 0.75em;
+    font-weight: 500;
+}
+
+.history-action {
+    color: #d0d0e0;
+    font-size: 0.85em;
+    margin-bottom: 6px;
+}
+
+.pass-badge {
+    display: inline-block;
+    background: rgba(251, 191, 36, 0.2);
+    color: #fbbf24;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 0.8em;
+    letter-spacing: 0.5px;
+}
+
+.history-cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.mini-card {
+    background: rgba(255, 255, 255, 0.9);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    font-weight: 600;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.mini-card.suit-red {
+    color: #dc3545;
+}
+
+.mini-card.suit-black {
+    color: #1a1a2e;
+}
+
+/* Scrollbar styling for sidebar */
+.play-history-list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.play-history-list::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 3px;
+}
+
+.play-history-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+}
+
+.play-history-list::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     header h1 {
@@ -591,5 +815,21 @@ header h1 {
         flex-direction: column;
         gap: 15px;
         align-items: flex-start;
+    }
+
+    .game-area {
+        flex-direction: column;
+    }
+
+    .play-history-sidebar {
+        width: 100%;
+        max-height: 200px;
+        border-left: none;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .play-history-sidebar.collapsed {
+        width: 100%;
+        max-height: 48px;
     }
 }

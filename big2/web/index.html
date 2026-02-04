@@ -166,48 +166,62 @@
         </div>
 
         <div id="game-area" class="game-area hidden">
-            <div class="game-header">
-                <div class="game-info">
-                    <span id="turn-indicator"></span>
-                    <span id="game-status"></span>
+            <div class="game-main">
+                <div class="game-header">
+                    <div class="game-info">
+                        <span id="turn-indicator"></span>
+                        <span id="game-status"></span>
+                    </div>
+                    <button id="new-game-btn" class="btn btn-secondary">New Game</button>
                 </div>
-                <button id="new-game-btn" class="btn btn-secondary">New Game</button>
+
+                <div class="opponents-area">
+                    <div id="opponents" class="opponents"></div>
+                </div>
+
+                <div class="trick-area">
+                    <h3>Current Trick</h3>
+                    <div id="trick-display" class="trick-display">
+                        <p class="empty-trick">No trick in play - you can play anything</p>
+                    </div>
+                </div>
+
+                <div id="bot-suggestion-area" class="bot-suggestion-area collapsed">
+                    <div class="bot-suggestion-header" id="toggle-bot-suggestion">
+                        <h3>🤖 AI Move Probabilities</h3>
+                        <span class="collapse-indicator">+</span>
+                    </div>
+                    <div id="bot-suggestion" class="bot-suggestion">
+                        <p class="no-suggestion">Waiting for your turn...</p>
+                    </div>
+                </div>
+
+                <div class="legal-moves-area">
+                    <h3>Legal Moves</h3>
+                    <div id="legal-moves" class="legal-moves"></div>
+                </div>
+
+                <div class="hand-area">
+                    <h3>Your Hand (<span id="hand-count">0</span> cards)</h3>
+                    <div id="hand" class="hand"></div>
+                    <div class="hand-actions">
+                        <button id="pass-btn" class="btn btn-secondary" disabled>Pass</button>
+                        <button id="play-btn" class="btn btn-primary" disabled>Play Selected</button>
+                        <button id="clear-selection-btn" class="btn btn-secondary" disabled>Clear Selection</button>
+                    </div>
+                </div>
+
             </div>
 
-            <div class="opponents-area">
-                <div id="opponents" class="opponents"></div>
-            </div>
-
-            <div class="trick-area">
-                <h3>Current Trick</h3>
-                <div id="trick-display" class="trick-display">
-                    <p class="empty-trick">No trick in play - you can play anything</p>
+            <div id="play-history-sidebar" class="play-history-sidebar">
+                <div class="sidebar-header">
+                    <h3>Play History</h3>
+                    <button id="toggle-sidebar" class="sidebar-toggle">−</button>
+                </div>
+                <div id="play-history-list" class="play-history-list">
+                    <p class="empty-history">No plays yet</p>
                 </div>
             </div>
-
-            <div class="bot-suggestion-area">
-                <h3>🤖 AI Move Probabilities</h3>
-                <div id="bot-suggestion" class="bot-suggestion">
-                    <p class="no-suggestion">Waiting for your turn...</p>
-                </div>
-            </div>
-
-            <div class="legal-moves-area">
-                <h3>Legal Moves</h3>
-                <div id="legal-moves" class="legal-moves"></div>
-            </div>
-
-            <div class="hand-area">
-                <h3>Your Hand (<span id="hand-count">0</span> cards)</h3>
-                <div id="hand" class="hand"></div>
-                <div class="hand-actions">
-                    <button id="pass-btn" class="btn btn-secondary" disabled>Pass</button>
-                    <button id="play-btn" class="btn btn-primary" disabled>Play Selected</button>
-                    <button id="clear-selection-btn" class="btn btn-secondary" disabled>Clear Selection</button>
-                </div>
-            </div>
-
-            <div id="ai-actions-log" class="ai-actions-log"></div>
         </div>
 
         <div id="game-over" class="game-over hidden">

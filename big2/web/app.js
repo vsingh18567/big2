@@ -3,6 +3,8 @@ let currentGameId = null;
 let selectedCards = [];
 let legalMoves = [];
 let gameMode = "classic"; // "classic" or "llm"
+let playHistory = []; // Track all plays during the game
+let humanPlayerId = 0; // Track the human player ID
 
 // Card suit and rank mappings
 const SUITS = ["♦", "♣", "♥", "♠"];
@@ -28,9 +30,98 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+    // Sidebar toggle
+    document.getElementById("toggle-sidebar").addEventListener("click", toggleSidebar);
+
+    // Bot suggestion toggle
+    document.getElementById("toggle-bot-suggestion").addEventListener("click", toggleBotSuggestion);
+
     // Initialize with classic mode visible
     handleModeChange();
 });
+
+// Sidebar toggle functionality
+function toggleSidebar() {
+    const sidebar = document.getElementById("play-history-sidebar");
+    const toggleBtn = document.getElementById("toggle-sidebar");
+    sidebar.classList.toggle("collapsed");
+    toggleBtn.textContent = sidebar.classList.contains("collapsed") ? "+" : "−";
+}
+
+// Bot suggestion toggle functionality
+function toggleBotSuggestion() {
+    const area = document.getElementById("bot-suggestion-area");
+    const indicator = area.querySelector(".collapse-indicator");
+    area.classList.toggle("collapsed");
+    indicator.textContent = area.classList.contains("collapsed") ? "+" : "−";
+}
+
+// Play history management
+function clearPlayHistory() {
+    playHistory = [];
+    renderPlayHistory();
+}
+
+function addToPlayHistory(player, action, cards) {
+    const isHuman = player === humanPlayerId;
+    const entry = {
+        id: playHistory.length + 1,
+        player: player,
+        isHuman: isHuman,
+        action: action, // "PASS" or the hand type display
+        cards: cards || [], // Array of card IDs
+        timestamp: new Date()
+    };
+    playHistory.push(entry);
+    renderPlayHistory();
+}
+
+function renderPlayHistory() {
+    const listContainer = document.getElementById("play-history-list");
+
+    if (playHistory.length === 0) {
+        listContainer.innerHTML = '<p class="empty-history">No plays yet</p>';
+        return;
+    }
+
+    let html = '';
+    // Reverse order - newest plays at the top
+    for (let i = playHistory.length - 1; i >= 0; i--) {
+        const entry = playHistory[i];
+        const playerLabel = entry.isHuman ? "You" : `P${entry.player}`;
+        const playerClass = entry.isHuman ? "player-human" : "player-ai";
+        const isPass = entry.action === "PASS";
+
+        html += `<div class="history-entry ${playerClass}">`;
+        html += `<div class="history-header">`;
+        html += `<span class="history-player ${playerClass}">${playerLabel}</span>`;
+        html += `<span class="history-round">#${entry.id}</span>`;
+        html += `</div>`;
+
+        if (isPass) {
+            html += `<div class="history-action pass-badge">PASS</div>`;
+        } else {
+            html += `<div class="history-action">${entry.action}</div>`;
+            if (entry.cards && entry.cards.length > 0) {
+                html += `<div class="history-cards">`;
+                entry.cards.forEach((cardId) => {
+                    const rank = RANKS[Math.floor(cardId / 4)];
+                    const suit = SUITS[cardId % 4];
+                    const isRed = suit === "♥" || suit === "♦";
+                    const suitClass = isRed ? "suit-red" : "suit-black";
+                    html += `<span class="mini-card ${suitClass}">${rank}${suit}</span>`;
+                });
+                html += `</div>`;
+            }
+        }
+        html += `</div>`;
+    }
+
+    listContainer.innerHTML = html;
+
+    // Scroll to top to show newest entry
+    listContainer.scrollTop = 0;
+}
 
 function handleModeChange() {
     const mode = document.getElementById("game-mode").value;
@@ -144,11 +235,16 @@ async function startGame() {
         selectedCards = [];
         legalMoves = [];
 
+        // Clear play history and track human player ID
+        clearPlayHistory();
+        humanPlayerId = gameState.human_player_id !== undefined ? gameState.human_player_id : (gameState.human_player !== undefined ? gameState.human_player : 0);
+
         document.getElementById("game-setup").classList.add("hidden");
         document.getElementById("game-area").classList.remove("hidden");
         document.getElementById("game-over").classList.add("hidden");
 
         updateGameDisplay(gameState);
+
     } catch (error) {
         alert(`Error starting game: ${error.message}`);
         console.error(error);
@@ -439,6 +535,9 @@ async function playMoveByIndex(moveIndex) {
     playBtn.disabled = true;
     playBtn.innerHTML = '<span class="loading"></span> Playing...';
 
+    // Capture move info before making the API call
+    const moveInfo = legalMoves[moveIndex];
+
     try {
         const endpoint = gameMode === "classic"
             ? `/api/game/${currentGameId}/action`
@@ -460,13 +559,17 @@ async function playMoveByIndex(moveIndex) {
         }
 
         const result = await response.json();
+
+        // Record human play to history
+        if (moveInfo) {
+            const isPass = moveInfo.type === 0;
+            const actionDisplay = isPass ? "PASS" : moveInfo.display;
+            addToPlayHistory(humanPlayerId, actionDisplay, isPass ? [] : (moveInfo.cards || []));
+        }
+
         selectedCards = [];
         updateGameDisplay(result);
 
-        // Show AI actions if any
-        if (result.ai_actions && result.ai_actions.length > 0) {
-            showAIActions(result.ai_actions);
-        }
     } catch (error) {
         alert(`Error playing move: ${error.message}`);
         console.error(error);
@@ -506,6 +609,9 @@ async function playSelectedCards() {
     playBtn.disabled = true;
     playBtn.innerHTML = '<span class="loading"></span> Playing...';
 
+    // Capture selected cards before sending
+    const playedCards = [...selectedCards];
+
     try {
         const response = await fetch(`/api/game/${currentGameId}/action`, {
             method: "POST",
@@ -523,14 +629,15 @@ async function playSelectedCards() {
         }
 
         const result = await response.json();
+
+        // Record human play to history - use trick info for display if available
+        const actionDisplay = result.trick ? result.trick.display : `${playedCards.length} card(s)`;
+        addToPlayHistory(humanPlayerId, actionDisplay, playedCards);
+
         selectedCards = [];
         clearSelection();
         updateGameDisplay(result);
 
-        // Show AI actions if any
-        if (result.ai_actions && result.ai_actions.length > 0) {
-            showAIActions(result.ai_actions);
-        }
     } catch (error) {
         alert(`Error playing cards: ${error.message}`);
         console.error(error);
@@ -553,20 +660,6 @@ async function playPass() {
     await playMoveByIndex(passIndex);
 }
 
-function showAIActions(aiActions) {
-    const logContainer = document.getElementById("ai-actions-log");
-    logContainer.innerHTML = "<h4>AI Actions:</h4>";
-
-    aiActions.forEach((action) => {
-        const actionElement = document.createElement("div");
-        actionElement.className = "ai-action-item";
-        actionElement.innerHTML = `<strong>Player ${action.player}:</strong> ${action.action.display}`;
-        logContainer.appendChild(actionElement);
-    });
-
-    // Auto-scroll to bottom
-    logContainer.scrollTop = logContainer.scrollHeight;
-}
 
 function showGameOver(gameState) {
     document.getElementById("game-area").classList.add("hidden");
