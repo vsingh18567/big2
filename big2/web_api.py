@@ -50,7 +50,7 @@ def ai_select_action(policy: nn.Module, state: np.ndarray, candidates: list[Comb
     """Select an action for an AI player using the trained policy."""
     with torch.no_grad():
         st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)
-        action_feats = [[combo_to_action_vector(c) for c in candidates]]
+        action_feats = [[combo_to_action_vector(c, card_count=policy.card_universe_size) for c in candidates]]
         logits_list, values = policy(st, action_feats)
         logits = logits_list[0]
         idx = int(torch.argmax(logits).item())
@@ -63,7 +63,7 @@ def ai_get_top_moves(
     """Get the top-k moves with their relative probabilities."""
     with torch.no_grad():
         st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)
-        action_feats = [[combo_to_action_vector(c) for c in candidates]]
+        action_feats = [[combo_to_action_vector(c, card_count=policy.card_universe_size) for c in candidates]]
         logits_list, values = policy(st, action_feats)
         logits = logits_list[0]
 

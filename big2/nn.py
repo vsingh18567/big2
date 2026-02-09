@@ -12,9 +12,24 @@ from big2.simulator.cards import PASS, Combo, card_suit
 
 DROPOUT_RATE = 0.1
 
-# Action vector dimensions:
-# 52 (card flags) + 1 (pass flag) + 9 (combo type) + 1 (num_cards) + 13 (key rank) + 4 (key suit) = 80
-ACTION_VECTOR_DIM = 80
+ACTION_VECTOR_META_DIM = 1 + 9 + 1 + 13 + 4  # pass flag + combo type + num_cards + key rank + key suit
+
+
+def resolve_cards_per_player(n_players: int, cards_per_player: int | None) -> int:
+    cpp = cards_per_player if cards_per_player is not None else 52 // n_players
+    if cpp <= 0:
+        raise ValueError("cards_per_player must be positive")
+    if n_players * cpp > 52:
+        raise ValueError(f"n_players * cards_per_player must be <= 52, got {n_players} * {cpp}")
+    return cpp
+
+
+def card_universe_size(n_players: int, cards_per_player: int | None) -> int:
+    return n_players * resolve_cards_per_player(n_players, cards_per_player)
+
+
+def action_vector_dim(card_count: int) -> int:
+    return card_count + ACTION_VECTOR_META_DIM
 
 
 @dataclass
@@ -22,6 +37,7 @@ class MLPPolicyConfig:
     """Configuration for MLPPolicy architecture."""
 
     n_players: int = 4
+    cards_per_player: int | None = None
     card_vocab: int = 53
     card_emb_dim: int = 32
     hidden: int = 1024
@@ -34,6 +50,7 @@ class SetPoolPolicyConfig:
     """Configuration for SetPoolPolicy architecture."""
 
     n_players: int = 4
+    cards_per_player: int | None = None
     card_vocab: int = 53
     card_emb_dim: int = 64
     hidden: int = 1536
@@ -46,6 +63,7 @@ class MLPQNetworkConfig:
     """Configuration for MLPQNetwork architecture."""
 
     n_players: int = 4
+    cards_per_player: int | None = None
     card_vocab: int = 53
     card_emb_dim: int = 32
     hidden: int = 1024
@@ -58,6 +76,7 @@ class SetPoolQNetworkConfig:
     """Configuration for SetPoolQNetwork architecture."""
 
     n_players: int = 4
+    cards_per_player: int | None = None
     card_vocab: int = 53
     card_emb_dim: int = 64
     hidden: int = 768
@@ -65,47 +84,59 @@ class SetPoolQNetworkConfig:
     device: str = "cpu"
 
 
-def input_dim(n_players: int = 4) -> int:
+def input_dim(n_players: int = 4, cards_per_player: int | None = None) -> int:
     """Calculate input dimension based on number of players.
 
     Returns:
-        cards_per_player + 52 (last_play) + 52 (seen) + (n_players - 1) (opponent counts)
-        + 1 (passes_in_row) + (n_players - 1) * 52 (opponent cards)
+        cards_per_player + card_count (last_play) + card_count (seen) + (n_players - 1) (opponent counts)
+        + 1 (passes_in_row) + (n_players - 1) * card_count (opponent cards)
     """
-    cards_per_player = 52 // n_players
-    return cards_per_player + 52 + 52 + (n_players - 1) + 1 + (n_players - 1) * 52
+    hand_slots = resolve_cards_per_player(n_players, cards_per_player)
+    card_count = n_players * hand_slots
+    return hand_slots + card_count + card_count + (n_players - 1) + 1 + (n_players - 1) * card_count
 
 
-def combo_to_action_vector(cmb: Combo) -> np.ndarray:
+def combo_to_action_vector(cmb: Combo, card_count: int = 52) -> np.ndarray:
     """
     Convert a Combo to a feature vector for the action encoder.
 
     Features:
-    - 52 dims: one-hot for cards used
+    - card_count dims: one-hot for cards used
     - 1 dim: pass flag
     - 9 dims: combo type one-hot (PASS, SINGLE, PAIR, TRIPLE, STRAIGHT, FLUSH, FULLHOUSE, FOUR_KIND, STRAIGHT_FLUSH)
     - 1 dim: number of cards (normalized by 5)
     - 13 dims: key rank one-hot (the primary rank determining combo strength)
     - 4 dims: key suit one-hot (for tiebreakers)
     """
-    vec = np.zeros(ACTION_VECTOR_DIM, dtype=np.float32)
+    if card_count <= 0 or card_count > 52:
+        raise ValueError(f"card_count must be in [1,52], got {card_count}")
 
-    # Card flags (0-51)
+    vec = np.zeros(action_vector_dim(card_count), dtype=np.float32)
+
+    # Card flags (0..card_count-1)
     for c in cmb.cards:
+        if c < 0 or c >= card_count:
+            raise ValueError(f"Card id {c} is out of range for card_count={card_count}")
         vec[c] = 1.0
 
-    # Pass flag (52)
+    pass_idx = card_count
+    combo_base = pass_idx + 1
+    num_cards_idx = combo_base + 9
+    key_rank_base = num_cards_idx + 1
+    key_suit_base = key_rank_base + 13
+
+    # Pass flag
     if cmb.type == PASS:
-        vec[52] = 1.0
-        # Combo type one-hot for PASS (53)
-        vec[53] = 1.0
+        vec[pass_idx] = 1.0
+        # Combo type one-hot for PASS
+        vec[combo_base] = 1.0
         return vec
 
-    # Combo type one-hot (53-61): 9 types
-    vec[53 + cmb.type] = 1.0
+    # Combo type one-hot: 9 types
+    vec[combo_base + cmb.type] = 1.0
 
-    # Number of cards normalized (62)
-    vec[62] = len(cmb.cards) / 5.0
+    # Number of cards normalized
+    vec[num_cards_idx] = len(cmb.cards) / 5.0
 
     # Key rank one-hot (63-75): 13 ranks
     # Extract the primary rank from the key tuple
@@ -117,29 +148,29 @@ def combo_to_action_vector(cmb: Combo) -> np.ndarray:
         # STRAIGHT_FLUSH: (high_suit, high_rank)
         if cmb.type in (1, 2, 3, 7):  # SINGLE, PAIR, TRIPLE, FOUR_KIND - rank is first
             key_rank = cmb.key[0]
-            vec[63 + key_rank] = 1.0
+            vec[key_rank_base + key_rank] = 1.0
         elif cmb.type == 4:  # STRAIGHT - high_rank is first
             key_rank = cmb.key[0]
-            vec[63 + key_rank] = 1.0
+            vec[key_rank_base + key_rank] = 1.0
         elif cmb.type == 5:  # FLUSH - suit is first, ranks follow
             if len(cmb.key) > 1:
                 key_rank = cmb.key[1]  # highest rank is second element
-                vec[63 + key_rank] = 1.0
+                vec[key_rank_base + key_rank] = 1.0
         elif cmb.type == 6:  # FULLHOUSE - trip_rank is first
             key_rank = cmb.key[0]
-            vec[63 + key_rank] = 1.0
+            vec[key_rank_base + key_rank] = 1.0
         elif cmb.type == 8:  # STRAIGHT_FLUSH - suit is first, high_rank is second
             if len(cmb.key) > 1:
                 key_rank = cmb.key[1]
-                vec[63 + key_rank] = 1.0
+                vec[key_rank_base + key_rank] = 1.0
 
-    # Key suit one-hot (76-79): 4 suits
+    # Key suit one-hot: 4 suits
     # Extract suit from the highest card in the combo for consistency
     if cmb.cards:
         # Use the suit of the highest card in the combo
         max_card = max(cmb.cards)
         key_suit = card_suit(max_card)
-        vec[76 + key_suit] = 1.0
+        vec[key_suit_base + key_suit] = 1.0
 
     return vec
 
@@ -163,6 +194,7 @@ def make_policy(
     *,
     config: MLPPolicyConfig | SetPoolPolicyConfig | None = None,
     n_players: int = 4,
+    cards_per_player: int | None = None,
     device: str = "cpu",
     **kwargs,
 ) -> nn.Module:
@@ -186,6 +218,7 @@ def make_policy(
         if arch_norm in {"mlp", "mlppolicy"}:
             config = MLPPolicyConfig(
                 n_players=n_players,
+                cards_per_player=cards_per_player,
                 device=device,
                 card_vocab=kwargs.get("card_vocab", 53),
                 card_emb_dim=kwargs.get("card_emb_dim", 32),
@@ -195,6 +228,7 @@ def make_policy(
         elif arch_norm in {"setpool", "set_pool", "pooled"}:
             config = SetPoolPolicyConfig(
                 n_players=n_players,
+                cards_per_player=cards_per_player,
                 device=device,
                 card_vocab=kwargs.get("card_vocab", 53),
                 card_emb_dim=kwargs.get("card_emb_dim", 64),
@@ -209,6 +243,7 @@ def make_policy(
             # Convert SetPoolPolicyConfig to MLPPolicyConfig if needed
             config = MLPPolicyConfig(
                 n_players=config.n_players,
+                cards_per_player=config.cards_per_player,
                 card_vocab=config.card_vocab,
                 card_emb_dim=config.card_emb_dim,
                 hidden=config.hidden,
@@ -218,6 +253,7 @@ def make_policy(
         print("Using MLPPolicy")
         return MLPPolicy(
             n_players=config.n_players,
+            cards_per_player=config.cards_per_player,
             card_vocab=config.card_vocab,
             card_emb_dim=config.card_emb_dim,
             hidden=config.hidden,
@@ -229,6 +265,7 @@ def make_policy(
             # Convert MLPPolicyConfig to SetPoolPolicyConfig if needed
             config = SetPoolPolicyConfig(
                 n_players=config.n_players,
+                cards_per_player=config.cards_per_player,
                 card_vocab=config.card_vocab,
                 card_emb_dim=config.card_emb_dim,
                 hidden=config.hidden,
@@ -238,6 +275,7 @@ def make_policy(
         print("Using SetPoolPolicy")
         return SetPoolPolicy(
             n_players=config.n_players,
+            cards_per_player=config.cards_per_player,
             card_vocab=config.card_vocab,
             card_emb_dim=config.card_emb_dim,
             hidden=config.hidden,
@@ -268,7 +306,7 @@ def _encode_actions_to_tensor(
     Flatten a batch of variable-length action feature lists.
 
     Returns:
-        feats: (sumA, ACTION_VECTOR_DIM)
+        feats: (sumA, action_vector_dim(card_count))
         counts: list length B, number of candidate actions per batch element
     """
     counts = [len(a) for a in actions_batch]
@@ -364,23 +402,26 @@ class MLPStateEncoder(nn.Module):
         self,
         *,
         n_players: int,
+        cards_per_player: int | None,
         card_vocab: int,
         card_emb_dim: int,
         hidden: int,
     ):
         super().__init__()
         self.n_players = n_players
-        self.cards_per_player = 52 // n_players
+        self.cards_per_player = resolve_cards_per_player(n_players, cards_per_player)
+        self.card_count = n_players * self.cards_per_player
+        self.card_universe_size = self.card_count
         self.pad_id = 52  # for -1
 
         self.card_emb = nn.Embedding(card_vocab, card_emb_dim)
         self.card_embedding_enc = nn.Linear(card_emb_dim * self.cards_per_player, hidden)
 
-        self.last_play_enc = nn.Linear(52, hidden)
-        self.seen_enc = nn.Linear(52, hidden)
+        self.last_play_enc = nn.Linear(self.card_count, hidden)
+        self.seen_enc = nn.Linear(self.card_count, hidden)
         self.counts_enc = nn.Linear(n_players - 1, hidden // 2)
         self.passes_enc = nn.Linear(1, hidden // 4)
-        self.opponent_cards_enc = nn.Linear((n_players - 1) * 52, hidden)
+        self.opponent_cards_enc = nn.Linear((n_players - 1) * self.card_count, hidden)
 
         self.state_proj = nn.Linear(hidden + hidden + hidden + hidden // 2 + hidden // 4 + hidden, hidden)
         self.state_ln = nn.LayerNorm(hidden)
@@ -390,9 +431,12 @@ class MLPStateEncoder(nn.Module):
         B = state_tensor.shape[0]
 
         hand_ids = state_tensor[:, : self.cards_per_player].clone()
-        last_play = state_tensor[:, self.cards_per_player : self.cards_per_player + 52].float()
-        seen = state_tensor[:, self.cards_per_player + 52 : self.cards_per_player + 104].float()
-        counts_start = self.cards_per_player + 104
+        hand_end = self.cards_per_player
+        last_play_end = hand_end + self.card_count
+        seen_end = last_play_end + self.card_count
+        last_play = state_tensor[:, hand_end:last_play_end].float()
+        seen = state_tensor[:, last_play_end:seen_end].float()
+        counts_start = seen_end
         counts_end = counts_start + (self.n_players - 1)
         counts = state_tensor[:, counts_start:counts_end].float()
         passes_start = counts_end
@@ -422,7 +466,7 @@ class ActionEncoder(nn.Module):
     def __init__(
         self,
         *,
-        in_dim: int = ACTION_VECTOR_DIM,
+        in_dim: int,
         hidden: int,
         activation: Literal["relu", "gelu"] = "relu",
         dropout: float = DROPOUT_RATE,
@@ -473,51 +517,57 @@ class DotProductScorer(nn.Module):
 
 class ValueHead(nn.Module):
     """State value head V(s) with deeper architecture for stable value estimation."""
+
     def __init__(
-        self, 
-        *, 
-        in_dim: int, 
-        hidden: int, 
+        self,
+        *,
+        in_dim: int,
+        hidden: int,
         activation: Literal["relu", "gelu"] = "relu",
         num_layers: int = 3,
-        dropout: float = 0.1
+        dropout: float = 0.1,
     ):
         super().__init__()
         act = nn.ReLU() if activation == "relu" else nn.GELU()
-        
+
         # Build deeper network with residual-friendly architecture
         layers = []
         current_dim = in_dim
-        
+
         # First layer: expand or maintain dimension
-        layers.extend([
-            nn.Linear(current_dim, hidden),
-            nn.LayerNorm(hidden),
-            act,
-            nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        ])
-        current_dim = hidden
-        
-        # Middle layers: maintain hidden dimension for stability
-        for _ in range(num_layers - 2):
-            layers.extend([
+        layers.extend(
+            [
                 nn.Linear(current_dim, hidden),
                 nn.LayerNorm(hidden),
                 act,
-                nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-            ])
-        
+                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+            ]
+        )
+        current_dim = hidden
+
+        # Middle layers: maintain hidden dimension for stability
+        for _ in range(num_layers - 2):
+            layers.extend(
+                [
+                    nn.Linear(current_dim, hidden),
+                    nn.LayerNorm(hidden),
+                    act,
+                    nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+                ]
+            )
+
         # Final projection to value
         layers.append(nn.Linear(hidden, 1))
-        
+
         self.net = nn.Sequential(*layers)
-        
+
         # Initialize final layer with smaller weights for stability
         nn.init.orthogonal_(self.net[-1].weight, gain=0.01)
         nn.init.constant_(self.net[-1].bias, 0.0)
-    
+
     def forward(self, state_h: torch.Tensor) -> torch.Tensor:
         return self.net(state_h).squeeze(-1)
+
 
 class CandidateScoringMixin:
     """
@@ -564,24 +614,44 @@ class CandidateScoringMixin:
 
 class MLPPolicy(nn.Module, CandidateScoringMixin):
     def __init__(
-        self, n_players: int = 4, card_vocab=53, card_emb_dim=32, hidden=1024, action_hidden=256, device="cpu"
+        self,
+        n_players: int = 4,
+        cards_per_player: int | None = None,
+        card_vocab=53,
+        card_emb_dim=32,
+        hidden=1024,
+        action_hidden=256,
+        device="cpu",
     ):
         super().__init__()
         self.device = device
         self.n_players = n_players  # legacy/public attribute used by training utils
+        self.cards_per_player = resolve_cards_per_player(n_players, cards_per_player)
+        self.card_count = n_players * self.cards_per_player
+        self.card_universe_size = self.card_count
+        self.action_dim = action_vector_dim(self.card_count)
         self.state_encoder = MLPStateEncoder(
-            n_players=n_players, card_vocab=card_vocab, card_emb_dim=card_emb_dim, hidden=hidden
+            n_players=n_players,
+            cards_per_player=self.cards_per_player,
+            card_vocab=card_vocab,
+            card_emb_dim=card_emb_dim,
+            hidden=hidden,
         )
-        self.action_encoder = ActionEncoder(hidden=action_hidden, activation="relu", dropout=DROPOUT_RATE)
+        self.action_encoder = ActionEncoder(
+            in_dim=self.action_dim,
+            hidden=action_hidden,
+            activation="relu",
+            dropout=DROPOUT_RATE,
+        )
         self.policy_scorer = ConcatScalarHead(
             state_dim=hidden, action_dim=action_hidden, hidden=hidden, activation="relu", dropout=DROPOUT_RATE
         )
         self.value_head = ValueHead(
-            in_dim=768  , 
-            hidden=768, 
+            in_dim=768,
+            hidden=768,
             activation="gelu",
             num_layers=3,  # Try 3-4
-            dropout=0.1
+            dropout=0.1,
         )
         # Legacy attribute aliases (kept for backward compatibility / introspection tooling).
         # Prefer using the modular components above in new code.
@@ -618,13 +688,16 @@ class SetPoolStateEncoder(nn.Module):
         self,
         *,
         n_players: int,
+        cards_per_player: int | None,
         card_vocab: int,
         card_emb_dim: int,
         hidden: int,
     ):
         super().__init__()
         self.n_players = n_players
-        self.cards_per_player = 52 // n_players
+        self.cards_per_player = resolve_cards_per_player(n_players, cards_per_player)
+        self.card_count = n_players * self.cards_per_player
+        self.card_universe_size = self.card_count
         self.pad_id = 52
 
         self.card_emb = nn.Embedding(card_vocab, card_emb_dim)
@@ -647,17 +720,20 @@ class SetPoolStateEncoder(nn.Module):
             nn.Dropout(DROPOUT_RATE),
         )
 
-    def _encode_onehot52(self, x52: torch.Tensor) -> torch.Tensor:
-        w = self.card_emb.weight[:52]  # (52,E)
-        return x52.to(dtype=w.dtype) @ w
+    def _encode_onehot_cards(self, x_cards: torch.Tensor) -> torch.Tensor:
+        w = self.card_emb.weight[: self.card_count]  # (C,E)
+        return x_cards.to(dtype=w.dtype) @ w
 
     def forward(self, state_tensor: torch.Tensor) -> torch.Tensor:
         B = state_tensor.shape[0]
 
         hand_ids = state_tensor[:, : self.cards_per_player].clone()
-        last_play = state_tensor[:, self.cards_per_player : self.cards_per_player + 52].float()
-        seen = state_tensor[:, self.cards_per_player + 52 : self.cards_per_player + 104].float()
-        counts_start = self.cards_per_player + 104
+        hand_end = self.cards_per_player
+        last_play_end = hand_end + self.card_count
+        seen_end = last_play_end + self.card_count
+        last_play = state_tensor[:, hand_end:last_play_end].float()
+        seen = state_tensor[:, last_play_end:seen_end].float()
+        counts_start = seen_end
         counts_end = counts_start + (self.n_players - 1)
         counts = state_tensor[:, counts_start:counts_end].float()
         passes_start = counts_end
@@ -671,16 +747,16 @@ class SetPoolStateEncoder(nn.Module):
         hand_pool = _pool_card_embeddings(hand_emb, hand_mask)  # (B,E)
         hand_h = self.hand_enc(hand_pool)  # (B,H)
 
-        lp_pool = self._encode_onehot52(last_play)
-        sn_pool = self._encode_onehot52(seen)
+        lp_pool = self._encode_onehot_cards(last_play)
+        sn_pool = self._encode_onehot_cards(seen)
         lp_h = self.set52_enc(lp_pool)
         sn_h = self.set52_enc(sn_pool)
 
         if opponent_cards.numel() == 0:
             opp_flat = torch.zeros((B, 0), device=state_tensor.device, dtype=hand_h.dtype)
         else:
-            opp = opponent_cards.view(B, self.n_players - 1, 52)
-            opp_pool = torch.einsum("bnc,ce->bne", opp, self.card_emb.weight[:52])  # (B,n-1,E)
+            opp = opponent_cards.view(B, self.n_players - 1, self.card_count)
+            opp_pool = torch.einsum("bnc,ce->bne", opp, self.card_emb.weight[: self.card_count])  # (B,n-1,E)
             opp_h = self.opp_enc(opp_pool)  # (B,n-1,H)
             opp_flat = opp_h.reshape(B, -1)
 
@@ -705,6 +781,7 @@ class SetPoolPolicy(nn.Module, CandidateScoringMixin):
     def __init__(
         self,
         n_players: int = 4,
+        cards_per_player: int | None = None,
         card_vocab: int = 53,
         card_emb_dim: int = 64,
         hidden: int = 768,
@@ -714,18 +791,25 @@ class SetPoolPolicy(nn.Module, CandidateScoringMixin):
         super().__init__()
         self.device = device
         self.n_players = n_players
+        self.cards_per_player = resolve_cards_per_player(n_players, cards_per_player)
+        self.card_count = n_players * self.cards_per_player
+        self.card_universe_size = self.card_count
+        self.action_dim = action_vector_dim(self.card_count)
         self.state_encoder = SetPoolStateEncoder(
-            n_players=n_players, card_vocab=card_vocab, card_emb_dim=card_emb_dim, hidden=hidden
+            n_players=n_players,
+            cards_per_player=self.cards_per_player,
+            card_vocab=card_vocab,
+            card_emb_dim=card_emb_dim,
+            hidden=hidden,
         )
-        self.action_encoder = ActionEncoder(hidden=action_hidden, activation="gelu", dropout=DROPOUT_RATE)
-        self.policy_scorer = DotProductScorer(state_dim=hidden, action_dim=action_hidden, scale=True)
-        self.value_head = ValueHead(
-            in_dim=hidden,
-            hidden=hidden,  
+        self.action_encoder = ActionEncoder(
+            in_dim=self.action_dim,
+            hidden=action_hidden,
             activation="gelu",
-            num_layers=3,  
-            dropout=0.1
+            dropout=DROPOUT_RATE,
         )
+        self.policy_scorer = DotProductScorer(state_dim=hidden, action_dim=action_hidden, scale=True)
+        self.value_head = ValueHead(in_dim=hidden, hidden=hidden, activation="gelu", num_layers=3, dropout=0.1)
 
     def forward_state(self, state_tensor: torch.Tensor) -> torch.Tensor:
         return self.state_encoder(state_tensor)
@@ -759,15 +843,35 @@ class MLPQNetwork(nn.Module, CandidateScoringMixin):
     """
 
     def __init__(
-        self, n_players: int = 4, card_vocab=53, card_emb_dim=32, hidden=1024, action_hidden=256, device="cpu"
+        self,
+        n_players: int = 4,
+        cards_per_player: int | None = None,
+        card_vocab=53,
+        card_emb_dim=32,
+        hidden=1024,
+        action_hidden=256,
+        device="cpu",
     ):
         super().__init__()
         self.device = device
         self.n_players = n_players  # legacy/public attribute
+        self.cards_per_player = resolve_cards_per_player(n_players, cards_per_player)
+        self.card_count = n_players * self.cards_per_player
+        self.card_universe_size = self.card_count
+        self.action_dim = action_vector_dim(self.card_count)
         self.state_encoder = MLPStateEncoder(
-            n_players=n_players, card_vocab=card_vocab, card_emb_dim=card_emb_dim, hidden=hidden
+            n_players=n_players,
+            cards_per_player=self.cards_per_player,
+            card_vocab=card_vocab,
+            card_emb_dim=card_emb_dim,
+            hidden=hidden,
         )
-        self.action_encoder = ActionEncoder(hidden=action_hidden, activation="relu", dropout=DROPOUT_RATE)
+        self.action_encoder = ActionEncoder(
+            in_dim=self.action_dim,
+            hidden=action_hidden,
+            activation="relu",
+            dropout=DROPOUT_RATE,
+        )
         self.q_scorer = ConcatScalarHead(
             state_dim=hidden, action_dim=action_hidden, hidden=hidden, activation="relu", dropout=DROPOUT_RATE
         )
@@ -817,6 +921,7 @@ class SetPoolQNetwork(nn.Module, CandidateScoringMixin):
     def __init__(
         self,
         n_players: int = 4,
+        cards_per_player: int | None = None,
         card_vocab: int = 53,
         card_emb_dim: int = 64,
         hidden: int = 768,
@@ -826,11 +931,24 @@ class SetPoolQNetwork(nn.Module, CandidateScoringMixin):
         super().__init__()
         self.device = device
         self.n_players = n_players  # public/legacy attribute
+        self.cards_per_player = resolve_cards_per_player(n_players, cards_per_player)
+        self.card_count = n_players * self.cards_per_player
+        self.card_universe_size = self.card_count
+        self.action_dim = action_vector_dim(self.card_count)
 
         self.state_encoder = SetPoolStateEncoder(
-            n_players=n_players, card_vocab=card_vocab, card_emb_dim=card_emb_dim, hidden=hidden
+            n_players=n_players,
+            cards_per_player=self.cards_per_player,
+            card_vocab=card_vocab,
+            card_emb_dim=card_emb_dim,
+            hidden=hidden,
         )
-        self.action_encoder = ActionEncoder(hidden=action_hidden, activation="gelu", dropout=DROPOUT_RATE)
+        self.action_encoder = ActionEncoder(
+            in_dim=self.action_dim,
+            hidden=action_hidden,
+            activation="gelu",
+            dropout=DROPOUT_RATE,
+        )
         self.q_scorer = DotProductScorer(state_dim=hidden, action_dim=action_hidden, scale=True)
 
         # Legacy attribute aliases (kept for backward compatibility / introspection tooling).

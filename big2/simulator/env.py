@@ -16,17 +16,26 @@ from big2.simulator.generate_hands import COMBO_GENERATORS
 
 
 class Big2Env:
-    def __init__(self, n_players: int):
+    def __init__(self, n_players: int, cards_per_player: int | None = None):
         self.n_players = n_players
+        max_cards_per_player = CARDS_PER_DECK // self.n_players
+        self.cards_per_player = cards_per_player if cards_per_player is not None else max_cards_per_player
+        if self.cards_per_player <= 0:
+            raise ValueError("cards_per_player must be positive")
+        if self.cards_per_player > max_cards_per_player:
+            raise ValueError(
+                f"cards_per_player={self.cards_per_player} exceeds max {max_cards_per_player} for n_players={n_players}"
+            )
+        self.total_cards_in_play = self.n_players * self.cards_per_player
+        self.card_universe_size = self.total_cards_in_play
         self.reset()
 
     def reset(self):
         """Resets the environment, deals cards, and starts the game"""
-        # Shuffle and deal the deck
-        deck = list(range(CARDS_PER_DECK))
+        # Only use the first ordinal cards in the deck, then shuffle/deal those cards.
+        deck = list(range(self.total_cards_in_play))
         random.shuffle(deck)
-        cards_per_player = CARDS_PER_DECK // self.n_players
-        self.hands = [deck[i * cards_per_player : (i + 1) * cards_per_player] for i in range(self.n_players)]
+        self.hands = [deck[i * self.cards_per_player : (i + 1) * self.cards_per_player] for i in range(self.n_players)]
 
         # Sort each hand to keep consistent
         self.hands = [sorted(hand) for hand in self.hands]
@@ -38,7 +47,7 @@ class Big2Env:
                 self.current_player = i
                 break
 
-        self.seen: list[int] = [0] * CARDS_PER_DECK
+        self.seen: list[int] = [0] * self.card_universe_size
         self.trick_pile: Combo | None = None
 
         self.passes_in_row: int = 0
@@ -50,10 +59,9 @@ class Big2Env:
 
     def _obs(self, player: int) -> np.ndarray:
         """Converts the internal game state into a numpy array"""
-        cards_per_player = CARDS_PER_DECK // self.n_players
         hand = self.hands[player]
-        hand_ids = hand + [-1] * (cards_per_player - len(hand))
-        last_play = [0] * 52
+        hand_ids = hand + [-1] * (self.cards_per_player - len(hand))
+        last_play = [0] * self.card_universe_size
         if self.trick_pile is not None:
             for c in self.trick_pile.cards:
                 last_play[c] = 1
@@ -69,7 +77,7 @@ class Big2Env:
         opponent_cards = []
         for i in range(1, self.n_players):
             opp_id = (player + i) % self.n_players
-            opp_cards_vec = [0] * 52
+            opp_cards_vec = [0] * self.card_universe_size
             for c in self.cards_played_by_player[opp_id]:
                 opp_cards_vec[c] = 1
             opponent_cards.extend(opp_cards_vec)

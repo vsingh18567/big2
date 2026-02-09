@@ -14,6 +14,7 @@ class PPOConfig:
 
     # Game settings
     n_players: int = 4
+    cards_per_player: int | None = None
     model_seat_count: int = 1  # Number of seats controlled by the learning policy per game
 
     # Training loop
@@ -119,6 +120,7 @@ def dump_training_run(
         policy_config = asdict(
             MLPPolicyConfig(
                 n_players=policy.n_players,  # type: ignore[attr-defined]
+                cards_per_player=getattr(policy, "cards_per_player", None),
                 card_vocab=53,  # Default, can't easily extract
                 card_emb_dim=policy.card_emb.embedding_dim,  # type: ignore[attr-defined]
                 hidden=policy.card_embedding_enc.out_features,  # type: ignore[attr-defined]
@@ -130,6 +132,7 @@ def dump_training_run(
         policy_config = asdict(
             SetPoolPolicyConfig(
                 n_players=policy.n_players,  # type: ignore[attr-defined]
+                cards_per_player=getattr(policy, "cards_per_player", None),
                 card_vocab=53,  # Default, can't easily extract
                 card_emb_dim=policy.card_emb.embedding_dim,  # type: ignore[attr-defined]
                 hidden=policy.hand_enc[0].out_features,  # type: ignore[attr-defined]
@@ -140,9 +143,21 @@ def dump_training_run(
     else:
         # Fallback: use defaults based on policy_arch
         if config.policy_arch.lower() in {"mlp", "mlppolicy"}:
-            policy_config = asdict(MLPPolicyConfig(n_players=config.n_players, device=config.device))
+            policy_config = asdict(
+                MLPPolicyConfig(
+                    n_players=config.n_players,
+                    cards_per_player=config.cards_per_player,
+                    device=config.device,
+                )
+            )
         else:
-            policy_config = asdict(SetPoolPolicyConfig(n_players=config.n_players, device=config.device))
+            policy_config = asdict(
+                SetPoolPolicyConfig(
+                    n_players=config.n_players,
+                    cards_per_player=config.cards_per_player,
+                    device=config.device,
+                )
+            )
 
     # Extract curriculum config from checkpoint manager (or use defaults)
     if checkpoint_manager is not None:

@@ -224,15 +224,3 @@ class TrainingMonitor:
 
 # Global monitor instance for easy access
 _global_monitor: TrainingMonitor | None = None
-
-
-def get_monitor() -> TrainingMonitor | None:
-    """Get the global monitor instance."""
-    return _global_monitor
-
-
-def create_monitor(stats_file: str = "training_stats.json") -> TrainingMonitor:
-    """Create and set the global monitor instance."""
-    global _global_monitor
-    _global_monitor = TrainingMonitor(stats_file=stats_file)
-    return _global_monitor

@@ -26,6 +26,10 @@ class StepRecord:
     action: str | None = None
 
 
+def _card_count_for_model(model: nn.Module) -> int:
+    return int(getattr(model, "card_universe_size", 52))
+
+
 def safe_categorical_from_logits(logits: torch.Tensor, candidates: list[Combo]) -> torch.distributions.Categorical:
     """
     Create a Categorical distribution from logits with stability checks.
@@ -76,7 +80,8 @@ def _policy_logits_and_value(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run a single-state policy forward pass and return logits/value."""
     st = torch.from_numpy(state[np.newaxis, :]).long().to(policy.device)  # type: ignore[attr-defined]
-    action_feats = [[combo_to_action_vector(c) for c in candidates]]
+    card_count = _card_count_for_model(policy)
+    action_feats = [[combo_to_action_vector(c, card_count=card_count) for c in candidates]]
     logits_list, values = policy(st, action_feats)
     return logits_list[0], values[0]
 
@@ -206,16 +211,6 @@ def episode(
     return traj
 
 
-def compute_returns(rewards: list[float], gamma: float = 1.0) -> list[float]:
-    G = 0.0
-    returns = []
-    for r in reversed(rewards):
-        G = r + gamma * G
-        returns.append(G)
-    returns.reverse()
-    return returns
-
-
 def select_action_greedy(policy: nn.Module, state: np.ndarray, candidates: list[Combo]) -> Combo:
     """Select action greedily (no sampling) for evaluation."""
     with torch.no_grad():
@@ -233,7 +228,7 @@ def select_action_q_greedy(qnet: SetPoolQNetwork, state: np.ndarray, candidates:
     """Select action greedily (argmax Q) for evaluation/opponents."""
     with torch.no_grad():
         st = torch.from_numpy(state[np.newaxis, :]).long().to(qnet.device)
-        action_feats = [[combo_to_action_vector(c) for c in candidates]]
+        action_feats = [[combo_to_action_vector(c, card_count=qnet.card_universe_size) for c in candidates]]
         q_list = qnet(st, action_feats)
         qvals = q_list[0]
         idx = int(qvals.argmax().item())
@@ -251,7 +246,7 @@ def select_action_q_epsilon_greedy(
         return candidates[idx], idx
     with torch.no_grad():
         st = torch.from_numpy(state[np.newaxis, :]).long().to(qnet.device)
-        action_feats = [[combo_to_action_vector(c) for c in candidates]]
+        action_feats = [[combo_to_action_vector(c, card_count=qnet.card_universe_size) for c in candidates]]
         q_list = qnet(st, action_feats)
         qvals = q_list[0]
         idx = int(qvals.argmax().item())
@@ -319,6 +314,7 @@ class OpponentMix:
 def play_evaluation_game(
     current_policy: nn.Module,
     n_players: int,
+    cards_per_player: int | None = None,
     opponent_strategy: Callable[[list[Combo]], Combo] = greedy_strategy,
     device="cpu",
 ) -> tuple[int | None, int, int, int]:
@@ -328,7 +324,7 @@ def play_evaluation_game(
     Returns:
         (winner, starting_position, cards_remaining_for_player_0, score_for_player_0)
     """
-    env = Big2Env(n_players)
+    env = Big2Env(n_players, cards_per_player=cards_per_player)
     state = env.reset()
     starting_position = env.current_player
 
@@ -359,8 +355,12 @@ def play_evaluation_game(
     return env.winner, starting_position, cards_remaining, score
 
 
-def evaluate_against_greedy(
-    current_policy: nn.Module, n_players: int, num_games: int = 500, device="cpu"
+def evaluate_policy(
+    current_policy: nn.Module,
+    n_players: int,
+    cards_per_player: int | None = None,
+    num_games: int = 500,
+    device="cpu",
 ) -> EvaluationMetrics:
     """
     Comprehensive evaluation of current policy.
@@ -382,7 +382,11 @@ def evaluate_against_greedy(
     # Evaluate against greedy
     for _ in range(num_games):
         winner, starting_pos, cards_remaining, score = play_evaluation_game(
-            current_policy, n_players, opponent_strategy=greedy_strategy, device=device
+            current_policy,
+            n_players,
+            cards_per_player=cards_per_player,
+            opponent_strategy=greedy_strategy,
+            device=device,
         )
         if winner == 0:
             wins_vs_greedy += 1
@@ -396,7 +400,11 @@ def evaluate_against_greedy(
     # Evaluate against random
     for _ in range(num_games):
         winner, _, _, score = play_evaluation_game(
-            current_policy, n_players, opponent_strategy=random_strategy, device=device
+            current_policy,
+            n_players,
+            cards_per_player=cards_per_player,
+            opponent_strategy=random_strategy,
+            device=device,
         )
         if winner == 0:
             wins_vs_random += 1
@@ -405,7 +413,11 @@ def evaluate_against_greedy(
     # Evaluate against smart strategy
     for _ in range(num_games):
         winner, _, _, score = play_evaluation_game(
-            current_policy, n_players, opponent_strategy=smart_strategy, device=device
+            current_policy,
+            n_players,
+            cards_per_player=cards_per_player,
+            opponent_strategy=smart_strategy,
+            device=device,
         )
         if winner == 0:
             wins_vs_smart += 1
@@ -441,11 +453,13 @@ class CheckpointManager:
         checkpoint_dir: str = "big2",
         device: str = "cpu",
         n_players: int = 4,
+        cards_per_player: int | None = None,
         curriculum_config: CurriculumConfig | None = None,
     ):
         self.checkpoint_dir = Path(checkpoint_dir)
         self.device = device
         self.n_players = n_players
+        self.cards_per_player = cards_per_player
         self.checkpoints: list[tuple[int, nn.Module]] = []  # (step, policy)
 
         # Use provided config or defaults
@@ -462,7 +476,11 @@ class CheckpointManager:
     def add_checkpoint(self, step: int, policy: nn.Module):
         """Add a checkpoint to the pool."""
         # Create a copy of the policy (same architecture as the current policy)
-        checkpoint_policy = type(policy)(n_players=self.n_players, device=self.device).to(self.device)
+        checkpoint_policy = type(policy)(
+            n_players=self.n_players,
+            cards_per_player=self.cards_per_player,
+            device=self.device,
+        ).to(self.device)
         checkpoint_policy.load_state_dict(policy.state_dict())
         checkpoint_policy.eval()
 
@@ -800,15 +818,26 @@ def plot_training_curves(
 
 
 def value_of_starting_hand(
-    policy: nn.Module, hand: list[int], n_players: int = 4, sims: int = 512, device="cpu"
+    policy: nn.Module,
+    hand: list[int],
+    n_players: int = 4,
+    cards_per_player: int | None = None,
+    sims: int = 512,
+    device="cpu",
 ) -> float:
     # Monte Carlo rollouts with frozen policy; returns expected terminal reward for seat 0 with given starting hand
     wins = 0.0
-    cards_per_player = 52 // n_players
+    if cards_per_player is None:
+        cards_per_player = 52 // n_players
+    total_cards_in_play = n_players * cards_per_player
+    if len(hand) != cards_per_player:
+        raise ValueError(f"hand size ({len(hand)}) must equal cards_per_player ({cards_per_player})")
+    if any(card < 0 or card >= total_cards_in_play for card in hand):
+        raise ValueError(f"hand cards must be within 0..{total_cards_in_play - 1}")
     for _ in range(sims):
-        env = Big2Env(n_players)
+        env = Big2Env(n_players, cards_per_player=cards_per_player)
         # Force seat 0 hand
-        deck = set(range(52))
+        deck = set(range(total_cards_in_play))
         for p in range(n_players):
             env.hands[p] = []
         env.hands[0] = sorted(hand)
@@ -827,7 +856,7 @@ def value_of_starting_hand(
         env.current_player = start_player
         env.trick_pile = None
         env.passes_in_row = 0
-        env.seen = [0] * 52
+        env.seen = [0] * env.card_universe_size
         env.done = False
         env.winner = None
 

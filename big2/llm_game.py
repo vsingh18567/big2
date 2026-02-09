@@ -5,6 +5,7 @@ LLM-based Big 2 game system with support for LLM, neural network, and human play
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from typing import Any, Literal
 
@@ -13,7 +14,7 @@ import numpy as np
 import torch
 from pydantic import BaseModel, Field, field_validator, model_validator
 from torch import nn
-import os
+
 from big2.nn import combo_to_action_vector
 from big2.simulator.cards import (
     FLUSH,
@@ -218,7 +219,7 @@ When given your hand and legal moves, respond with ONLY the move number (e.g., "
                 max_tokens=self.config.max_tokens,
             )
             cost = litellm.completion_cost(completion_response=response)
-            self.total_cost += float(cost) 
+            self.total_cost += float(cost)
 
             assistant_message = response.choices[0].message.content.strip()
             self.messages.append({"role": "assistant", "content": assistant_message})
@@ -305,7 +306,7 @@ class NNPlayer(Player):
 
         with torch.no_grad():
             st = torch.from_numpy(state[np.newaxis, :]).long().to(self.policy.device)
-            action_feats = [[combo_to_action_vector(c) for c in candidates]]
+            action_feats = [[combo_to_action_vector(c, card_count=self.policy.card_universe_size) for c in candidates]]
             logits_list, values = self.policy(st, action_feats)
             logits = logits_list[0]
             idx = int(torch.argmax(logits).item())
@@ -377,7 +378,9 @@ class GameRunner:
         self.state = self.env.reset()
         # Play until human's turn or game ends
         self._play_until_human_or_done()
-        print(f"Total cost: {sum(player.total_cost if hasattr(player, 'total_cost') else 0.0 for player in self.players)}")
+        print(
+            f"Total cost: {sum(player.total_cost if hasattr(player, 'total_cost') else 0.0 for player in self.players)}"
+        )
         return self.get_state()
 
     def _get_game_context(self, player_id: int) -> dict[str, Any]:

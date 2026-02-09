@@ -14,7 +14,7 @@ from big2.train_helpers import (
     CheckpointManager,
     compute_gae_from_values,
     episode,
-    evaluate_against_greedy,
+    evaluate_policy,
     plot_training_curves,
     value_of_starting_hand,
 )
@@ -169,7 +169,7 @@ def train_selfplay(
             # Comprehensive evaluation
             print(f"\n[Step {batch}] Evaluating policy...")
             policy.eval()
-            metrics = evaluate_against_greedy(policy, n_players, num_games=eval_games, device=device)
+            metrics = evaluate_policy(policy, n_players, num_games=eval_games, device=device)
             policy.train()
 
             eval_episodes.append(batch)

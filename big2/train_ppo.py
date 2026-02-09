@@ -17,7 +17,7 @@ from big2.simulator.smart_strategy import smart_strategy
 from big2.train_helpers import (
     CheckpointManager,
     compute_gae_from_values,
-    evaluate_against_greedy,
+    evaluate_policy,
     plot_training_curves,
     random_strategy,
     safe_categorical_from_logits,
@@ -130,13 +130,12 @@ def collect_ppo_trajectories(
                 n_before = len(env.hands[p])
                 next_state, done = env.step(action)
                 n_after = len(env.hands[p])
-                cards_per_player = 52 // env.n_players
                 reward = _shaped_step_reward(
                     action=action,
                     candidates=candidates,
                     n_cards_before=n_before,
                     n_cards_after=n_after,
-                    cards_per_player=cards_per_player,
+                    cards_per_player=env.cards_per_player,
                     step_penalty=step_penalty,
                     progress_reward_coef=progress_reward_coef,
                     pass_penalty=pass_penalty,
@@ -160,15 +159,15 @@ def collect_ppo_trajectories(
                 for model_seat in model_seats:
                     if len(episode_trajs[model_seat]) > 0:
                         if model_seat == winner:
-                            MAX_CARDS = 52 // env.n_players
-                            opp_frac = sum(
-                                len(env.hands[i]) for i in range(env.n_players) if i != model_seat
-                            ) / (MAX_CARDS * (env.n_players - 1))
+                            max_cards = env.cards_per_player
+                            opp_frac = sum(len(env.hands[i]) for i in range(env.n_players) if i != model_seat) / (
+                                max_cards * (env.n_players - 1)
+                            )
                             final_r = 1.0 + opp_frac
                         else:
                             # Scale terminal loss by remaining cards, but clamp to -1 once you're
                             # above half a starting hand. (In 4p: cards_per_player=13, half=6.5.)
-                            cards_left_frac = len(env.hands[q]) / (52 // env.n_players)
+                            cards_left_frac = len(env.hands[model_seat]) / env.cards_per_player
                             final_r = -1.0 - cards_left_frac
                         # Add terminal reward on top of intermediate step penalty
                         episode_trajs[model_seat][-1].reward += final_r
@@ -184,6 +183,7 @@ def collect_ppo_trajectories(
 
 def collect_ppo_trajectories_batched(
     n_players: int,
+    cards_per_player: int | None,
     policy: nn.Module,
     episodes_per_batch: int,
     opponent_strategies_by_env: list[dict[int, nn.Module | Callable]],
@@ -212,7 +212,7 @@ def collect_ppo_trajectories_batched(
     trajectories: dict[int, list[PPOStepRecord]] = {p: [] for p in range(n_players)}
 
     # Create multiple environments to run in parallel
-    envs = [Big2Env(n_players) for _ in range(episodes_per_batch)]
+    envs = [Big2Env(n_players, cards_per_player=cards_per_player) for _ in range(episodes_per_batch)]
     states = [env.reset() for env in envs]
     if len(model_seats_by_env) != episodes_per_batch:
         raise ValueError("model_seats_by_env must have length episodes_per_batch")
@@ -259,7 +259,10 @@ def collect_ppo_trajectories_batched(
         # Batch forward pass for all model players
         if batch_states:
             state_tensor = torch.from_numpy(np.array(batch_states)).long().to(device)
-            action_feats_batch = [[combo_to_action_vector(c) for c in cands] for cands in batch_candidates]
+            action_feats_batch = [
+                [combo_to_action_vector(c, card_count=policy.card_universe_size) for c in cands]
+                for cands in batch_candidates
+            ]
 
             with torch.no_grad():
                 logits_list, values = policy(state_tensor, action_feats_batch)
@@ -317,14 +320,13 @@ def collect_ppo_trajectories_batched(
             next_state, done = env.step(action)
             if actor in model_seats_by_env[env_idx]:
                 n_after = len(env.hands[actor])
-                cards_per_player = 52 // env.n_players
                 candidates = candidates_by_env_idx[env_idx]
                 shaped = _shaped_step_reward(
                     action=action,
                     candidates=candidates,
                     n_cards_before=n_before,
                     n_cards_after=n_after,
-                    cards_per_player=cards_per_player,
+                    cards_per_player=env.cards_per_player,
                     step_penalty=step_penalty,
                     progress_reward_coef=progress_reward_coef,
                     pass_penalty=pass_penalty,
@@ -336,19 +338,19 @@ def collect_ppo_trajectories_batched(
             if done:
                 winner = env.winner
                 model_seats = model_seats_by_env[env_idx]
-                
+
                 # 1. Calculate the 'pot' of penalties from losers
                 # Using a standard Big 2 linear penalty (1 point per card)
                 total_penalty_pot = 0.0
-                cards_per_player = 52 // env.n_players
-                
+                cards_per_player_local = env.cards_per_player
+
                 for q in range(env.n_players):
                     if q != winner:
                         cards_left = len(env.hands[q])
                         # Normalize penalty to keep the scale near [-1, 1]
                         # e.g., Losing with all 13 cards = -1.0
-                        penalty = cards_left / cards_per_player
-                        
+                        penalty = cards_left / cards_per_player_local
+
                         # If the loser is a model-controlled seat, assign its reward
                         if q in model_seats and len(episode_trajs[env_idx][q]) > 0:
                             episode_trajs[env_idx][q][-1].reward = -penalty
@@ -500,7 +502,10 @@ def ppo_update(
 
             # Recompute logprobs and values with current policy
             state_tensor = torch.from_numpy(np.array(batch_states)).long().to(device)
-            action_feats = [[combo_to_action_vector(c) for c in candidates] for candidates in batch_candidates]
+            action_feats = [
+                [combo_to_action_vector(c, card_count=policy.card_universe_size) for c in candidates]
+                for candidates in batch_candidates
+            ]
             logits_list, values = policy(state_tensor, action_feats)
 
             # Extract logprobs for chosen actions
@@ -550,7 +555,7 @@ def ppo_update(
             # Update
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+            nn.utils.clip_grad_norm_(policy.parameters(), 10)
             optimizer.step()
 
             total_policy_loss += policy_loss.item()
@@ -571,6 +576,7 @@ def ppo_update(
 def train_ppo(
     config: PPOConfig | None = None,
     n_players=4,
+    cards_per_player: int | None = None,
     model_seat_count=1,
     batches=2000,
     episodes_per_batch=10,
@@ -580,7 +586,7 @@ def train_ppo(
     entropy_beta=0.01,
     value_coef=0.5,
     gamma=0.99,
-    lam=0.95,
+    lam=1.0,
     seed=42,
     device="cpu",
     eval_interval=50,
@@ -602,6 +608,7 @@ def train_ppo(
         # Backward compatibility: construct config from kwargs
         config = PPOConfig(
             n_players=n_players,
+            cards_per_player=cards_per_player,
             model_seat_count=model_seat_count,
             batches=batches,
             episodes_per_batch=episodes_per_batch,
@@ -644,12 +651,21 @@ def train_ppo(
         "Phase 3: Self-play 55-65% with retention of mastered opponents)"
     )
 
-    env = Big2Env(config.n_players)
-    policy = make_policy(config.policy_arch, n_players=config.n_players, device=config.device).to(config.device)
+    env = Big2Env(config.n_players, cards_per_player=config.cards_per_player)
+    policy = make_policy(
+        config.policy_arch,
+        n_players=config.n_players,
+        cards_per_player=config.cards_per_player,
+        device=config.device,
+    ).to(config.device)
     optimizer = optim.Adam(policy.parameters(), lr=config.lr)
 
     # Checkpoint manager for opponent sampling
-    checkpoint_manager = CheckpointManager(device=config.device, n_players=config.n_players)
+    checkpoint_manager = CheckpointManager(
+        device=config.device,
+        n_players=config.n_players,
+        cards_per_player=config.cards_per_player,
+    )
 
     # Learning rate scheduler: warmup + cosine annealing
     warmup_batches = int(config.batches * config.warmup_fraction)
@@ -685,6 +701,7 @@ def train_ppo(
     if monitor is not None:
         config_summary = {
             "n_players": config.n_players,
+            "cards_per_player": config.cards_per_player,
             "model_seat_count": config.model_seat_count,
             "episodes_per_batch": config.episodes_per_batch,
             "ppo_epochs": config.ppo_epochs,
@@ -720,6 +737,7 @@ def train_ppo(
         if config.use_batched_collection:
             trajectories = collect_ppo_trajectories_batched(
                 config.n_players,
+                config.cards_per_player,
                 policy,
                 config.episodes_per_batch,
                 opponent_strategies_by_env,
@@ -799,8 +817,12 @@ def train_ppo(
             # Comprehensive evaluation
             print(f"\n[Step {batch}] Evaluating policy...")
             policy.eval()
-            metrics = evaluate_against_greedy(
-                policy, config.n_players, num_games=config.eval_games, device=config.device
+            metrics = evaluate_policy(
+                policy,
+                config.n_players,
+                cards_per_player=config.cards_per_player,
+                num_games=config.eval_games,
+                device=config.device,
             )
             policy.train()
 
@@ -918,8 +940,9 @@ if __name__ == "__main__":
     # Create config with all training parameters
     config = PPOConfig(
         n_players=n_players,
+        cards_per_player=cards_per_player,
         model_seat_count=1,
-        batches=5000,
+        batches=8000,
         episodes_per_batch=128,
         ppo_epochs=2,
         clip_epsilon=0.2,
@@ -930,7 +953,7 @@ if __name__ == "__main__":
         lam=1,
         seed=42,
         device=device,
-        eval_interval=100,
+        eval_interval=500,
         eval_games=250,
         mini_batch_size=128,
         policy_arch="setpool",
@@ -959,12 +982,16 @@ if __name__ == "__main__":
     ) = train_ppo(config=config, monitor=monitor)
 
     hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
-    val = value_of_starting_hand(policy, hand, n_players=n_players, sims=64, device=device)
+    val = value_of_starting_hand(
+        policy, hand, n_players=n_players, cards_per_player=cards_per_player, sims=64, device=device
+    )
     print("Random starting hand:", [card_name(c) for c in hand])
     print("Win rate:", val)
 
-    hand = sorted(random.sample(range(52), cards_per_player))
-    val = value_of_starting_hand(policy, hand, n_players=n_players, sims=64, device=device)
+    hand = sorted(random.sample(range(n_players * cards_per_player), cards_per_player))
+    val = value_of_starting_hand(
+        policy, hand, n_players=n_players, cards_per_player=cards_per_player, sims=64, device=device
+    )
     print("Random starting hand:", [card_name(c) for c in hand])
     print("Win rate:", val)
 

@@ -304,7 +304,7 @@ def sarsa_1step_update(
     for ep in episodes:
         for r in ep:
             states.append(r.state)
-            actions_batch.append([combo_to_action_vector(c) for c in r.candidates])
+            actions_batch.append([combo_to_action_vector(c, card_count=qnet.card_universe_size) for c in r.candidates])
             chosen_indices.append(r.action_idx)
 
     # Compute bootstrap values for all non-terminal steps (1-step SARSA).
@@ -318,7 +318,9 @@ def sarsa_1step_update(
         for t in range(len(ep) - 1):
             nxt = ep[t + 1]
             next_states.append(nxt.state)
-            next_actions_batch.append([combo_to_action_vector(c) for c in nxt.candidates])
+            next_actions_batch.append(
+                [combo_to_action_vector(c, card_count=qnet_target.card_universe_size) for c in nxt.candidates]
+            )
             next_chosen_indices.append(nxt.action_idx)
 
     q_bootstrap_vals: list[float] = []
@@ -498,15 +500,22 @@ def train_q_network(
 
 
 def win_rate_of_starting_hand_q(
-    qnet: SetPoolQNetwork, hand: list[int], n_players: int = 4, sims: int = 512, device: str = "cpu"
+    qnet: SetPoolQNetwork,
+    hand: list[int],
+    n_players: int = 4,
+    cards_per_player: int | None = None,
+    sims: int = 512,
+    device: str = "cpu",
 ) -> float:
     """Monte Carlo estimate of win rate for seat 0 given a fixed starting hand, using greedy-Q self-play."""
     wins = 0.0
-    cards_per_player = 52 // n_players
+    if cards_per_player is None:
+        cards_per_player = 52 // n_players
+    total_cards_in_play = n_players * cards_per_player
     for _ in range(sims):
-        env = Big2Env(n_players)
+        env = Big2Env(n_players, cards_per_player=cards_per_player)
         # Force seat 0 hand
-        deck = set(range(52))
+        deck = set(range(total_cards_in_play))
         for p in range(n_players):
             env.hands[p] = []
         env.hands[0] = sorted(hand)
@@ -525,7 +534,7 @@ def win_rate_of_starting_hand_q(
         env.current_player = start_player
         env.trick_pile = None
         env.passes_in_row = 0
-        env.seen = [0] * 52
+        env.seen = [0] * env.card_universe_size
         env.done = False
         env.winner = None
 
@@ -570,12 +579,16 @@ if __name__ == "__main__":
     )
 
     hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
-    val = win_rate_of_starting_hand_q(qnet, hand, n_players=n_players, sims=64, device=device)
+    val = win_rate_of_starting_hand_q(
+        qnet, hand, n_players=n_players, cards_per_player=cards_per_player, sims=64, device=device
+    )
     print("Random starting hand:", [card_name(c) for c in hand])
     print("Win rate:", val)
 
-    hand = sorted(random.sample(range(52), cards_per_player))
-    val = win_rate_of_starting_hand_q(qnet, hand, n_players=n_players, sims=64, device=device)
+    hand = sorted(random.sample(range(n_players * cards_per_player), cards_per_player))
+    val = win_rate_of_starting_hand_q(
+        qnet, hand, n_players=n_players, cards_per_player=cards_per_player, sims=64, device=device
+    )
     print("Random starting hand:", [card_name(c) for c in hand])
     print("Win rate:", val)
 
