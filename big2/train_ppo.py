@@ -421,7 +421,8 @@ def ppo_update(
 
             if record.done:
                 rewards_t = torch.tensor(ep_rewards, dtype=torch.float32, device=device)
-                values_t = torch.stack(ep_values).squeeze(-1).to(device)
+                # Keep values as a 1D time axis even for single-step episodes.
+                values_t = torch.stack(ep_values).reshape(-1).to(device)
                 dones_t = torch.tensor(ep_dones, dtype=torch.float32, device=device)
 
                 adv_t, ret_t = compute_gae_from_values(rewards_t, values_t, dones_t, gamma=gamma, lam=lam)
@@ -449,7 +450,7 @@ def ppo_update(
 
     # Convert to tensors
     old_logprobs_t = torch.stack(all_old_logprobs).to(device)
-    old_values_t = torch.stack(all_old_values).squeeze(-1).to(device)
+    old_values_t = torch.stack(all_old_values).reshape(-1).to(device)
     advantages = torch.stack(all_advantages).to(device)
     returns = torch.stack(all_returns).to(device)
 
@@ -934,8 +935,8 @@ if __name__ == "__main__":
     else:
         device = "cpu"
     print(f"Using device: {device}")
-    n_players = 4
-    cards_per_player = 52 // n_players
+    n_players = 2
+    cards_per_player = 5
 
     # Create config with all training parameters
     config = PPOConfig(
@@ -953,7 +954,7 @@ if __name__ == "__main__":
         lam=1,
         seed=42,
         device=device,
-        eval_interval=500,
+        eval_interval=20,
         eval_games=250,
         mini_batch_size=128,
         policy_arch="setpool",
@@ -981,14 +982,15 @@ if __name__ == "__main__":
         opponent_mixes,
     ) = train_ppo(config=config, monitor=monitor)
 
-    hand = sorted([48, 49, 50, 51, 47, 43, 39, 35, 31, 27, 26, 1, 0][:cards_per_player])
+    total_cards_in_play = n_players * cards_per_player
+    hand = sorted(range(total_cards_in_play - cards_per_player, total_cards_in_play))
     val = value_of_starting_hand(
         policy, hand, n_players=n_players, cards_per_player=cards_per_player, sims=64, device=device
     )
     print("Random starting hand:", [card_name(c) for c in hand])
     print("Win rate:", val)
 
-    hand = sorted(random.sample(range(n_players * cards_per_player), cards_per_player))
+    hand = sorted(random.sample(range(total_cards_in_play), cards_per_player))
     val = value_of_starting_hand(
         policy, hand, n_players=n_players, cards_per_player=cards_per_player, sims=64, device=device
     )

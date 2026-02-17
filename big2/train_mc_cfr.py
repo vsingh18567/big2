@@ -26,6 +26,8 @@ class CFRConfig:
     traversals_per_player: int = 8
     regret_epochs: int = 2
     strategy_epochs: int = 2
+    regret_updates_per_player: int = 128
+    strategy_updates_per_iteration: int = 128
     regret_lr: float = 5e-4
     strategy_lr: float = 5e-4
     batch_size: int = 64
@@ -36,6 +38,8 @@ class CFRConfig:
     seed: int = 42
     eval_interval: int = 1
     eval_games: int = 200
+    reinit_regret_nets_each_iteration: bool = False
+    reinit_avg_policy_each_iteration: bool = False
 
 
 @dataclass
@@ -198,6 +202,7 @@ def _train_regret_net(
     optimizer: optim.Optimizer,
     batch_size: int,
     epochs: int,
+    updates_per_epoch: int,
     device: str,
 ) -> float:
     """Train regret network with LCFR-weighted MSE on sampled regrets."""
@@ -205,7 +210,7 @@ def _train_regret_net(
         return 0.0
     net.train()
     total_loss = 0.0
-    steps = max(1, len(buffer) // max(1, batch_size))
+    steps = max(1, updates_per_epoch)
     for _ in range(epochs):
         for _ in range(steps):
             batch = buffer.sample(batch_size)
@@ -245,6 +250,7 @@ def _train_strategy_net(
     optimizer: optim.Optimizer,
     batch_size: int,
     epochs: int,
+    updates_per_epoch: int,
     device: str,
 ) -> float:
     """Train average policy network to match stored strategies."""
@@ -252,7 +258,7 @@ def _train_strategy_net(
         return 0.0
     net.train()
     total_loss = 0.0
-    steps = max(1, len(buffer) // max(1, batch_size))
+    steps = max(1, updates_per_epoch)
     for _ in range(epochs):
         for _ in range(steps):
             batch = buffer.sample(batch_size)
@@ -293,21 +299,16 @@ def train_mc_cfr(config: CFRConfig) -> tuple[nn.Module, list[float], list[float]
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
 
-    regret_nets = [
-        make_policy(
+    def _new_policy() -> nn.Module:
+        return make_policy(
             config.policy_arch,
             n_players=config.n_players,
             cards_per_player=config.cards_per_player,
             device=config.device,
         ).to(config.device)
-        for _ in range(config.n_players)
-    ]
-    avg_policy = make_policy(
-        config.policy_arch,
-        n_players=config.n_players,
-        cards_per_player=config.cards_per_player,
-        device=config.device,
-    ).to(config.device)
+
+    regret_nets = [_new_policy() for _ in range(config.n_players)]
+    avg_policy = _new_policy()
 
     regret_opts = [optim.Adam(net.parameters(), lr=config.regret_lr) for net in regret_nets]
     avg_opt = optim.Adam(avg_policy.parameters(), lr=config.strategy_lr)
@@ -321,6 +322,13 @@ def train_mc_cfr(config: CFRConfig) -> tuple[nn.Module, list[float], list[float]
     win_rates = []
 
     for iteration in tqdm(range(1, config.iterations + 1), desc="CFR iterations"):
+        if config.reinit_regret_nets_each_iteration:
+            regret_nets = [_new_policy() for _ in range(config.n_players)]
+            regret_opts = [optim.Adam(net.parameters(), lr=config.regret_lr) for net in regret_nets]
+        if config.reinit_avg_policy_each_iteration:
+            avg_policy = _new_policy()
+            avg_opt = optim.Adam(avg_policy.parameters(), lr=config.strategy_lr)
+
         # Collect traversals per player
         for player in range(config.n_players):
             for _ in tqdm(
@@ -352,6 +360,7 @@ def train_mc_cfr(config: CFRConfig) -> tuple[nn.Module, list[float], list[float]
                 regret_opts[player],
                 config.batch_size,
                 config.regret_epochs,
+                config.regret_updates_per_player,
                 config.device,
             )
             regret_losses.append(loss)
@@ -363,6 +372,7 @@ def train_mc_cfr(config: CFRConfig) -> tuple[nn.Module, list[float], list[float]
             avg_opt,
             config.batch_size,
             config.strategy_epochs,
+            config.strategy_updates_per_iteration,
             config.device,
         )
 
@@ -404,6 +414,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--traversals-per-player", type=int, default=64, help="Traversals per player per iteration.")
     parser.add_argument("--regret-epochs", type=int, default=2, help="SGD epochs for regret networks.")
     parser.add_argument("--strategy-epochs", type=int, default=2, help="SGD epochs for average policy network.")
+    parser.add_argument(
+        "--regret-updates-per-player",
+        type=int,
+        default=128,
+        help="Fixed gradient updates per player per regret epoch (independent of buffer size).",
+    )
+    parser.add_argument(
+        "--strategy-updates-per-iteration",
+        type=int,
+        default=128,
+        help="Fixed gradient updates per strategy epoch (independent of buffer size).",
+    )
     parser.add_argument("--batch-size", type=int, default=64, help="Mini-batch size for training.")
     parser.add_argument("--regret-lr", type=float, default=5e-4, help="Learning rate for regret networks.")
     parser.add_argument("--strategy-lr", type=float, default=5e-4, help="Learning rate for policy network.")
@@ -413,9 +435,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--policy-arch", type=str, default="setpool", choices=["mlp", "setpool"], help="Policy architecture."
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
-    parser.add_argument("--eval-interval", type=int, default=1, help="Evaluate every N iterations.")
+    parser.add_argument("--eval-interval", type=int, default=40, help="Evaluate every N iterations.")
     parser.add_argument("--eval-games", type=int, default=200, help="Games per evaluation.")
     parser.add_argument("--device", type=str, default="", help="Override device (cpu/cuda).")
+    parser.add_argument(
+        "--reinit-regret-nets-each-iteration",
+        action="store_true",
+        help="Reinitialize regret networks from scratch at each CFR iteration.",
+    )
+    parser.add_argument(
+        "--reinit-avg-policy-each-iteration",
+        action="store_true",
+        help="Reinitialize average policy network from scratch at each CFR iteration.",
+    )
     parser.add_argument(
         "--save-path",
         type=str,
@@ -444,6 +476,8 @@ def _main() -> None:
         traversals_per_player=args.traversals_per_player,
         regret_epochs=args.regret_epochs,
         strategy_epochs=args.strategy_epochs,
+        regret_updates_per_player=args.regret_updates_per_player,
+        strategy_updates_per_iteration=args.strategy_updates_per_iteration,
         regret_lr=args.regret_lr,
         strategy_lr=args.strategy_lr,
         batch_size=args.batch_size,
@@ -454,6 +488,8 @@ def _main() -> None:
         seed=args.seed,
         eval_interval=args.eval_interval,
         eval_games=args.eval_games,
+        reinit_regret_nets_each_iteration=args.reinit_regret_nets_each_iteration,
+        reinit_avg_policy_each_iteration=args.reinit_avg_policy_each_iteration,
     )
 
     policy, _regret_loss_history, _strategy_loss_history, _eval_episodes, _win_rates = train_mc_cfr(config)
