@@ -51,8 +51,24 @@ htmlcov/
 # Model checkpoints
 *.pt
 
-# Figures
+# Generated data and outputs
 *.png
 *.jpg
+*.csv
+*.pdf
+*.json
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
 
 .env
