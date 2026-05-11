@@ -1,3 +1,4 @@
+import argparse
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from big2.train_helpers import (
     value_of_starting_hand,
 )
 from big2.train_ppo_config import PPOConfig, dump_training_run
+from big2.training_logger import TrainingHistoryLogger
 from big2.training_monitor import TrainingMonitor
 
 
@@ -161,14 +163,14 @@ def collect_ppo_trajectories(
                     if len(episode_trajs[model_seat]) > 0:
                         if model_seat == winner:
                             MAX_CARDS = 52 // env.n_players
-                            opp_frac = sum(
-                                len(env.hands[i]) for i in range(env.n_players) if i != model_seat
-                            ) / (MAX_CARDS * (env.n_players - 1))
+                            opp_frac = sum(len(env.hands[i]) for i in range(env.n_players) if i != model_seat) / (
+                                MAX_CARDS * (env.n_players - 1)
+                            )
                             final_r = 1.0 + opp_frac
                         else:
                             # Scale terminal loss by remaining cards, but clamp to -1 once you're
                             # above half a starting hand. (In 4p: cards_per_player=13, half=6.5.)
-                            cards_left_frac = len(env.hands[q]) / (52 // env.n_players)
+                            cards_left_frac = len(env.hands[model_seat]) / (52 // env.n_players)
                             final_r = -1.0 - cards_left_frac
                         # Add terminal reward on top of intermediate step penalty
                         episode_trajs[model_seat][-1].reward += final_r
@@ -336,19 +338,19 @@ def collect_ppo_trajectories_batched(
             if done:
                 winner = env.winner
                 model_seats = model_seats_by_env[env_idx]
-                
+
                 # 1. Calculate the 'pot' of penalties from losers
                 # Using a standard Big 2 linear penalty (1 point per card)
                 total_penalty_pot = 0.0
                 cards_per_player = 52 // env.n_players
-                
+
                 for q in range(env.n_players):
                     if q != winner:
                         cards_left = len(env.hands[q])
                         # Normalize penalty to keep the scale near [-1, 1]
                         # e.g., Losing with all 13 cards = -1.0
                         penalty = cards_left / cards_per_player
-                        
+
                         # If the loser is a model-controlled seat, add terminal penalty to shaped reward
                         if q in model_seats and len(episode_trajs[env_idx][q]) > 0:
                             episode_trajs[env_idx][q][-1].reward -= penalty
@@ -638,11 +640,25 @@ def train_ppo(
     print("Opponent diversity within batch: enabled (opponents sampled per-environment/per-seat)")
     print(f"PPO parameters: epochs={config.ppo_epochs}, clip_epsilon={config.clip_epsilon}")
     print(f"Policy architecture: {config.policy_arch}")
-    print(
-        "Opponent mixture: Mastery-based curriculum learning "
-        "(Phase 1: Learn greedy 50-60%, Phase 2: Learn smart 45-50% with greedy retention, "
-        "Phase 3: Self-play 55-65% with retention of mastered opponents)"
-    )
+    print(f"Opponent mode: {config.opponent_mode}")
+    if config.opponent_mode == "curriculum":
+        print(
+            "Opponent mixture: Mastery-based curriculum learning "
+            "(Phase 1: Learn greedy 50-60%, Phase 2: Learn smart 45-50% with greedy retention, "
+            "Phase 3: Self-play 55-65% with retention of mastered opponents)"
+        )
+    elif config.opponent_mode == "checkpointed_self_play":
+        print(
+            "Opponent mixture: checkpointed self-play "
+            f"(current={config.checkpoint_self_play_current_weight}, "
+            f"checkpoint={config.checkpoint_self_play_checkpoint_weight})"
+        )
+    elif config.opponent_mode == "current_self_play":
+        print("Opponent mixture: pure current-policy self-play")
+    elif config.opponent_mode == "fixed_opponent":
+        print(f"Opponent mixture: fixed {config.fixed_opponent_strategy} opponents")
+    elif config.opponent_mode == "smart_only":
+        print("Opponent mixture: fixed smart opponents")
 
     env = Big2Env(config.n_players)
     policy = make_policy(config.policy_arch, n_players=config.n_players, device=config.device).to(config.device)
@@ -681,6 +697,15 @@ def train_ppo(
     win_rates_smart = []
     opponent_mixes = []  # Track opponent mix at each evaluation checkpoint
 
+    history_logger = TrainingHistoryLogger(
+        config.history_path,
+        metadata={
+            "algorithm": "ppo",
+            "config": config,
+        },
+        write_every=config.history_write_every,
+    )
+
     # Initialize training monitor if provided
     if monitor is not None:
         config_summary = {
@@ -695,6 +720,10 @@ def train_ppo(
             "lam": config.lam,
             "mini_batch_size": config.mini_batch_size,
             "policy_arch": config.policy_arch,
+            "opponent_mode": config.opponent_mode,
+            "fixed_opponent_strategy": config.fixed_opponent_strategy,
+            "checkpoint_self_play_current_weight": config.checkpoint_self_play_current_weight,
+            "checkpoint_self_play_checkpoint_weight": config.checkpoint_self_play_checkpoint_weight,
         }
         monitor.start_training(config.batches, config_summary)
 
@@ -707,6 +736,12 @@ def train_ppo(
             model_seats_by_env.append([int(s) for s in seats])
         frac = batch / config.batches
         target_entropy = config.target_entropy_start + (config.target_entropy_end - config.target_entropy_start) * frac
+        configured_opponent_mix = checkpoint_manager.compute_opponent_mix(
+            opponent_mode=config.opponent_mode,
+            fixed_opponent_strategy=config.fixed_opponent_strategy,
+            checkpoint_self_play_current_weight=config.checkpoint_self_play_current_weight,
+            checkpoint_self_play_checkpoint_weight=config.checkpoint_self_play_checkpoint_weight,
+        )
         opponent_strategies_by_env: list[dict[int, nn.Module | Callable]] = []
         for env_idx in range(config.episodes_per_batch):
             model_seats = set(model_seats_by_env[env_idx])
@@ -714,7 +749,7 @@ def train_ppo(
             for p in all_players:
                 if p in model_seats:
                     continue
-                opp_map[p] = checkpoint_manager.sample_opponent_policy(policy)
+                opp_map[p] = checkpoint_manager.sample_opponent_policy(policy, configured_opponent_mix)
             opponent_strategies_by_env.append(opp_map)
 
         # Disable dropout during rollout collection for stable old_logprobs
@@ -777,12 +812,24 @@ def train_ppo(
         policy_loss_history.append(policy_loss)
         value_loss_history.append(value_loss)
         entropy_history.append(entropy)
+        current_lr = scheduler.get_last_lr()[0]
+        total_steps = sum(len(v) for v in trajectories.values())
+        steps_per_ep = total_steps / config.episodes_per_batch if config.episodes_per_batch > 0 else 0.0
+
+        history_logger.log_batch(
+            batch,
+            total_loss=total_loss,
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            entropy=entropy,
+            lr=current_lr,
+            entropy_beta=current_entropy_beta,
+            total_model_steps=total_steps,
+            steps_per_episode=steps_per_ep,
+        )
 
         # Update training monitor
         if monitor is not None:
-            current_lr = scheduler.get_last_lr()[0]
-            total_steps = sum(len(v) for v in trajectories.values())
-            steps_per_ep = total_steps / config.episodes_per_batch if config.episodes_per_batch > 0 else 0.0
             monitor.update_batch(
                 batch=batch,
                 policy_loss=policy_loss,
@@ -816,8 +863,31 @@ def train_ppo(
             checkpoint_manager.update_mastery(metrics.win_rate_vs_greedy, metrics.win_rate_vs_smart)
 
             # Track opponent mix at this checkpoint
-            opponent_mix = checkpoint_manager.compute_dynamic_opponent_mix()
+            opponent_mix = checkpoint_manager.compute_opponent_mix(
+                opponent_mode=config.opponent_mode,
+                fixed_opponent_strategy=config.fixed_opponent_strategy,
+                checkpoint_self_play_current_weight=config.checkpoint_self_play_current_weight,
+                checkpoint_self_play_checkpoint_weight=config.checkpoint_self_play_checkpoint_weight,
+            )
             opponent_mixes.append(opponent_mix)
+            history_logger.log_evaluation(
+                batch,
+                win_rate_vs_greedy=metrics.win_rate_vs_greedy,
+                win_rate_vs_random=metrics.win_rate_vs_random,
+                win_rate_vs_smart=metrics.win_rate_vs_smart,
+                avg_cards_remaining_when_losing=metrics.avg_cards_remaining_when_losing,
+                avg_score_vs_greedy=metrics.avg_score_vs_greedy,
+                avg_score_vs_random=metrics.avg_score_vs_random,
+                avg_score_vs_smart=metrics.avg_score_vs_smart,
+                win_rate_by_starting_position=metrics.win_rate_by_starting_position,
+                total_games=metrics.total_games,
+                ema_win_rate_greedy=checkpoint_manager.ema_win_rate_greedy,
+                ema_win_rate_smart=checkpoint_manager.ema_win_rate_smart,
+                mastery_greedy=checkpoint_manager.mastery_greedy,
+                mastery_smart=checkpoint_manager.mastery_smart,
+                opponent_mix=opponent_mix,
+                num_checkpoints=len(checkpoint_manager.checkpoints),
+            )
 
             # Update training monitor with evaluation results
             if monitor is not None:
@@ -879,7 +949,7 @@ def train_ppo(
             )
             print(
                 f"[Step {batch}] Checkpoints in pool: {n_checkpoints}, "
-                f"Opponent mix: {checkpoint_manager.compute_dynamic_opponent_mix()}, "
+                f"Opponent mix: {opponent_mix}, "
                 f"EMA win rates (greedy: {ema_greedy:.2%}, smart: {ema_smart:.2%})\n"
             )
 
@@ -895,6 +965,7 @@ def train_ppo(
     # Finish training monitor
     if monitor is not None:
         monitor.finish_training(success=True, message="Training completed successfully")
+    history_logger.finish(status="completed")
 
     return (
         policy,
@@ -910,7 +981,56 @@ def train_ppo(
     )
 
 
+def _parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train a Big 2 PPO policy.")
+    parser.add_argument(
+        "--curriculum",
+        "--opponent-mode",
+        dest="opponent_mode",
+        choices=["curriculum", "checkpointed_self_play", "current_self_play", "fixed_opponent", "smart_only"],
+        default="curriculum",
+        help=(
+            "Opponent curriculum/mode. Use current_self_play for pure current-policy self-play, "
+            "checkpointed_self_play for current/checkpoint self-play, fixed_opponent for one heuristic, "
+            "or smart_only for all smart-strategy opponents."
+        ),
+    )
+    parser.add_argument(
+        "--fixed-opponent-strategy",
+        choices=["smart", "greedy", "random"],
+        default="smart",
+        help="Heuristic strategy used when --curriculum=fixed_opponent.",
+    )
+    parser.add_argument(
+        "--checkpoint-current-weight",
+        type=float,
+        default=0.5,
+        help="Current-policy weight used when --curriculum=checkpointed_self_play.",
+    )
+    parser.add_argument(
+        "--checkpoint-weight",
+        type=float,
+        default=0.5,
+        help="Previous-checkpoint weight used when --curriculum=checkpointed_self_play.",
+    )
+    parser.add_argument("--history-path", default=None, help="Raw training-history JSON path.")
+    parser.add_argument("--stats-file", default=None, help="Training monitor stats JSON path.")
+    parser.add_argument("--training-config-path", default="training_config.json", help="Saved PPO config JSON path.")
+    parser.add_argument("--batches", type=int, default=None, help="Override number of training batches.")
+    parser.add_argument("--episodes-per-batch", type=int, default=None, help="Override episodes per batch.")
+    parser.add_argument(
+        "--model-seat-count",
+        type=int,
+        default=None,
+        help="Number of seats controlled by the learning policy per training game.",
+    )
+    parser.add_argument("--eval-interval", type=int, default=None, help="Override evaluation interval in batches.")
+    parser.add_argument("--eval-games", type=int, default=None, help="Override evaluation games per opponent.")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = _parse_cli_args()
     if torch.cuda.is_available():
         device = "cuda"
     else:
@@ -920,33 +1040,64 @@ if __name__ == "__main__":
     cards_per_player = 52 // n_players
 
     # Create config with all training parameters
-    config = PPOConfig(
-        n_players=n_players,
-        model_seat_count=1,
-        batches=5000,
-        episodes_per_batch=128,
-        ppo_epochs=2,
-        clip_epsilon=0.2,
-        lr=3e-5,
-        entropy_beta=0.05,
-        value_coef=0.5,
-        gamma=0.99,
-        lam=0.95,
-        seed=42,
-        device=device,
-        eval_interval=100,
-        eval_games=500,
-        mini_batch_size=128,
-        policy_arch="setpool",
-    )
+    if args.history_path is None:
+        if args.opponent_mode == "curriculum":
+            history_path = "training_history_ppo.json"
+        else:
+            history_path = f"training_history_ppo_{args.opponent_mode}.json"
+    else:
+        history_path = args.history_path
+
+    config_kwargs = {
+        "n_players": n_players,
+        "model_seat_count": 1,
+        "batches": 5000,
+        "episodes_per_batch": 128,
+        "ppo_epochs": 2,
+        "clip_epsilon": 0.2,
+        "lr": 3e-5,
+        "entropy_beta": 0.05,
+        "value_coef": 0.5,
+        "gamma": 0.99,
+        "lam": 0.95,
+        "seed": 42,
+        "device": device,
+        "eval_interval": 100,
+        "eval_games": 500,
+        "mini_batch_size": 128,
+        "policy_arch": "setpool",
+        "opponent_mode": args.opponent_mode,
+        "fixed_opponent_strategy": args.fixed_opponent_strategy,
+        "checkpoint_self_play_current_weight": args.checkpoint_current_weight,
+        "checkpoint_self_play_checkpoint_weight": args.checkpoint_weight,
+        "history_path": history_path,
+    }
+    if args.batches is not None:
+        config_kwargs["batches"] = args.batches
+    if args.episodes_per_batch is not None:
+        config_kwargs["episodes_per_batch"] = args.episodes_per_batch
+    if args.model_seat_count is not None:
+        config_kwargs["model_seat_count"] = args.model_seat_count
+    if args.eval_interval is not None:
+        config_kwargs["eval_interval"] = args.eval_interval
+    if args.eval_games is not None:
+        config_kwargs["eval_games"] = args.eval_games
+
+    config = PPOConfig(**config_kwargs)
 
     # Save config for reproducibility
-    config.save("training_config.json")
-    print("Training config saved to training_config.json")
-    # To load: config = PPOConfig.load("training_config.json")
+    config.save(args.training_config_path)
+    print(f"Training config saved to {args.training_config_path}")
+    # To load: config = PPOConfig.load(args.training_config_path)
 
     # Create training monitor for real-time dashboard
-    monitor = TrainingMonitor(stats_file="training_stats.json")
+    stats_file = args.stats_file
+    if stats_file is None:
+        if args.opponent_mode == "curriculum":
+            stats_file = "training_stats.json"
+        else:
+            stats_file = f"training_stats_ppo_{args.opponent_mode}.json"
+    monitor = TrainingMonitor(stats_file=stats_file)
     print("Training monitor initialized - view at http://localhost:8000/monitor")
 
     (

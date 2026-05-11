@@ -18,6 +18,7 @@ from big2.train_helpers import (
     plot_training_curves,
     value_of_starting_hand,
 )
+from big2.training_logger import TrainingHistoryLogger
 
 
 def train_selfplay(
@@ -32,6 +33,8 @@ def train_selfplay(
     device="cpu",
     eval_interval=50,
     eval_games=500,
+    history_path: str | None = "training_history_reinforce.json",
+    history_write_every: int = 1,
 ):
     random.seed(seed)
     np.random.seed(seed)
@@ -88,6 +91,26 @@ def train_selfplay(
     eval_episodes = []
     win_rates = []
     win_rates_smart = []
+    history_logger = TrainingHistoryLogger(
+        history_path,
+        metadata={
+            "algorithm": "reinforce_style_policy_gradient",
+            "config": {
+                "n_players": n_players,
+                "batches": batches,
+                "episodes_per_batch": episodes_per_batch,
+                "lr": lr,
+                "entropy_beta": entropy_beta,
+                "value_coef": value_coef,
+                "gamma": gamma,
+                "seed": seed,
+                "device": device,
+                "eval_interval": eval_interval,
+                "eval_games": eval_games,
+            },
+        },
+        write_every=history_write_every,
+    )
 
     for batch in tqdm(range(1, batches + 1)):
         batch_logp, batch_val, batch_ret, batch_adv, batch_ent, batch_max_logp = [], [], [], [], [], []
@@ -161,6 +184,20 @@ def train_selfplay(
         value_loss_history.append(value_loss.item())
         entropy_history.append(entropy.item())
         max_logprob_history.append(avg_max_logprob.item())
+        current_lr = scheduler.get_last_lr()[0]
+        total_model_steps = sum(len(tensor) for tensor in batch_logp)
+        history_logger.log_batch(
+            batch,
+            total_loss=loss.item(),
+            policy_loss=policy_loss.item(),
+            value_loss=value_loss.item(),
+            entropy=entropy.item(),
+            max_logprob=avg_max_logprob.item(),
+            lr=current_lr,
+            entropy_beta=current_entropy_beta,
+            total_model_steps=total_model_steps,
+            steps_per_episode=total_model_steps / episodes_per_batch if episodes_per_batch > 0 else 0.0,
+        )
 
         # Evaluation every eval_interval episodes
         if batch % eval_interval == 0:
@@ -178,6 +215,23 @@ def train_selfplay(
 
             # Update mastery levels based on win rates against greedy and smart
             checkpoint_manager.update_mastery(metrics.win_rate_vs_greedy, metrics.win_rate_vs_smart)
+            history_logger.log_evaluation(
+                batch,
+                win_rate_vs_greedy=metrics.win_rate_vs_greedy,
+                win_rate_vs_random=metrics.win_rate_vs_random,
+                win_rate_vs_smart=metrics.win_rate_vs_smart,
+                avg_cards_remaining_when_losing=metrics.avg_cards_remaining_when_losing,
+                avg_score_vs_greedy=metrics.avg_score_vs_greedy,
+                avg_score_vs_random=metrics.avg_score_vs_random,
+                avg_score_vs_smart=metrics.avg_score_vs_smart,
+                win_rate_by_starting_position=metrics.win_rate_by_starting_position,
+                total_games=metrics.total_games,
+                ema_win_rate_greedy=checkpoint_manager.ema_win_rate_greedy,
+                ema_win_rate_smart=checkpoint_manager.ema_win_rate_smart,
+                mastery_greedy=checkpoint_manager.mastery_greedy,
+                mastery_smart=checkpoint_manager.mastery_smart,
+                num_checkpoints=len(checkpoint_manager.checkpoints),
+            )
 
             print(f"[Step {batch}] Evaluation Results ({metrics.total_games} games):")
             wins_vs_greedy = int(metrics.win_rate_vs_greedy * metrics.total_games)
@@ -224,6 +278,7 @@ def train_selfplay(
 
             checkpoint_manager.add_checkpoint(batch, policy)
 
+    history_logger.finish(status="completed")
     return (
         policy,
         loss_history,

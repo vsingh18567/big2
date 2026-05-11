@@ -25,6 +25,8 @@ class TrainingStats:
     policy_loss_history: list[float] = field(default_factory=list)
     value_loss_history: list[float] = field(default_factory=list)
     entropy_history: list[float] = field(default_factory=list)
+    q_loss_history: list[float] = field(default_factory=list)
+    epsilon_history: list[float] = field(default_factory=list)
 
     # Evaluation metrics (at eval intervals)
     eval_episodes: list[int] = field(default_factory=list)
@@ -39,6 +41,7 @@ class TrainingStats:
     # Current training state
     current_lr: float = 0.0
     current_entropy_beta: float = 0.0
+    current_epsilon: float = 0.0
     steps_per_episode: float = 0.0
 
     # Curriculum/opponent info
@@ -102,6 +105,8 @@ class TrainingMonitor:
         total_loss: float,
         lr: float | None = None,
         entropy_beta: float | None = None,
+        q_loss: float | None = None,
+        epsilon: float | None = None,
         steps_per_episode: float | None = None,
     ):
         """Called after each training batch."""
@@ -112,11 +117,17 @@ class TrainingMonitor:
             self.stats.policy_loss_history.append(policy_loss)
             self.stats.value_loss_history.append(value_loss)
             self.stats.entropy_history.append(entropy)
+            if q_loss is not None:
+                self.stats.q_loss_history.append(q_loss)
+            if epsilon is not None:
+                self.stats.epsilon_history.append(epsilon)
 
             if lr is not None:
                 self.stats.current_lr = lr
             if entropy_beta is not None:
                 self.stats.current_entropy_beta = entropy_beta
+            if epsilon is not None:
+                self.stats.current_epsilon = epsilon
             if steps_per_episode is not None:
                 self.stats.steps_per_episode = steps_per_episode
 

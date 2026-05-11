@@ -316,6 +316,50 @@ class OpponentMix:
         return (weights, ["greedy", "smart", "current", "checkpoint", "random"])
 
 
+def fixed_opponent_mix(strategy_name: str) -> OpponentMix:
+    """Return a one-hot opponent mix for a fixed heuristic strategy."""
+    if strategy_name == "greedy":
+        return OpponentMix(
+            greedy_weight=1.0,
+            smart_weight=0.0,
+            current_weight=0.0,
+            checkpoint_weight=0.0,
+            random_weight=0.0,
+        )
+    if strategy_name == "smart":
+        return OpponentMix(
+            greedy_weight=0.0,
+            smart_weight=1.0,
+            current_weight=0.0,
+            checkpoint_weight=0.0,
+            random_weight=0.0,
+        )
+    if strategy_name == "random":
+        return OpponentMix(
+            greedy_weight=0.0,
+            smart_weight=0.0,
+            current_weight=0.0,
+            checkpoint_weight=0.0,
+            random_weight=1.0,
+        )
+    raise ValueError(f"Unknown fixed opponent strategy: {strategy_name!r}")
+
+
+def checkpointed_self_play_mix(current_weight: float, checkpoint_weight: float) -> OpponentMix:
+    """Return a current/checkpoint self-play opponent mix."""
+    if current_weight < 0 or checkpoint_weight < 0:
+        raise ValueError("Self-play weights must be non-negative")
+    if current_weight + checkpoint_weight <= 0:
+        raise ValueError("At least one self-play weight must be positive")
+    return OpponentMix(
+        greedy_weight=0.0,
+        smart_weight=0.0,
+        current_weight=current_weight,
+        checkpoint_weight=checkpoint_weight,
+        random_weight=0.0,
+    )
+
+
 def play_evaluation_game(
     current_policy: nn.Module,
     n_players: int,
@@ -542,7 +586,38 @@ class CheckpointManager:
             random_weight=random_weight,
         )
 
-    def sample_opponent_policy(self, current_policy: nn.Module) -> nn.Module | Callable:
+    def compute_opponent_mix(
+        self,
+        *,
+        opponent_mode: str = "curriculum",
+        fixed_opponent_strategy: str = "smart",
+        checkpoint_self_play_current_weight: float = 0.5,
+        checkpoint_self_play_checkpoint_weight: float = 0.5,
+    ) -> OpponentMix:
+        """Compute the configured opponent mix for training."""
+        if opponent_mode == "curriculum":
+            return self.compute_dynamic_opponent_mix()
+        if opponent_mode == "checkpointed_self_play":
+            return checkpointed_self_play_mix(
+                checkpoint_self_play_current_weight,
+                checkpoint_self_play_checkpoint_weight,
+            )
+        if opponent_mode == "current_self_play":
+            return checkpointed_self_play_mix(1.0, 0.0)
+        if opponent_mode == "fixed_opponent":
+            return fixed_opponent_mix(fixed_opponent_strategy)
+        if opponent_mode == "smart_only":
+            return fixed_opponent_mix("smart")
+        raise ValueError(
+            "opponent_mode must be one of: curriculum, checkpointed_self_play, "
+            "current_self_play, fixed_opponent, smart_only"
+        )
+
+    def sample_opponent_policy(
+        self,
+        current_policy: nn.Module,
+        opponent_mix: OpponentMix | None = None,
+    ) -> nn.Module | Callable:
         """
         Sample an opponent policy/strategy based on dynamic mastery-weighted curriculum.
         Returns either a policy or a callable strategy function.
@@ -552,8 +627,10 @@ class CheckpointManager:
         - Phase 2: Learning smart while retaining greedy (15-20% greedy retention, 45-50% smart)
         - Phase 3: Self-play focus with retention (10-15% greedy, 15-20% smart, 55-65% self-play)
         """
-        # Compute dynamic opponent mix based on current mastery levels
-        opponent_mix = self.compute_dynamic_opponent_mix()
+        # Compute dynamic opponent mix based on current mastery levels unless
+        # the caller provides an explicit configured mix.
+        if opponent_mix is None:
+            opponent_mix = self.compute_dynamic_opponent_mix()
         weights, strategies = opponent_mix.get_weights_and_strategies()
 
         # Sample strategy type using weighted random choice
@@ -571,8 +648,9 @@ class CheckpointManager:
                 _, checkpoint_policy = random.choice(self.checkpoints[-20:])
                 return checkpoint_policy
             else:
-                # Fallback to random if no checkpoints available
-                return random_strategy
+                # Early in checkpointed self-play there may be no older policy.
+                # Use the current policy rather than injecting heuristic/random play.
+                return current_policy
         else:  # random
             return random_strategy
 

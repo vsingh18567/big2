@@ -473,51 +473,57 @@ class DotProductScorer(nn.Module):
 
 class ValueHead(nn.Module):
     """State value head V(s) with deeper architecture for stable value estimation."""
+
     def __init__(
-        self, 
-        *, 
-        in_dim: int, 
-        hidden: int, 
+        self,
+        *,
+        in_dim: int,
+        hidden: int,
         activation: Literal["relu", "gelu"] = "relu",
         num_layers: int = 3,
-        dropout: float = 0.1
+        dropout: float = 0.1,
     ):
         super().__init__()
         act = nn.ReLU() if activation == "relu" else nn.GELU()
-        
+
         # Build deeper network with residual-friendly architecture
         layers = []
         current_dim = in_dim
-        
+
         # First layer: expand or maintain dimension
-        layers.extend([
-            nn.Linear(current_dim, hidden),
-            nn.LayerNorm(hidden),
-            act,
-            nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        ])
-        current_dim = hidden
-        
-        # Middle layers: maintain hidden dimension for stability
-        for _ in range(num_layers - 2):
-            layers.extend([
+        layers.extend(
+            [
                 nn.Linear(current_dim, hidden),
                 nn.LayerNorm(hidden),
                 act,
-                nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-            ])
-        
+                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+            ]
+        )
+        current_dim = hidden
+
+        # Middle layers: maintain hidden dimension for stability
+        for _ in range(num_layers - 2):
+            layers.extend(
+                [
+                    nn.Linear(current_dim, hidden),
+                    nn.LayerNorm(hidden),
+                    act,
+                    nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+                ]
+            )
+
         # Final projection to value
         layers.append(nn.Linear(hidden, 1))
-        
+
         self.net = nn.Sequential(*layers)
-        
+
         # Initialize final layer with smaller weights for stability
         nn.init.orthogonal_(self.net[-1].weight, gain=0.01)
         nn.init.constant_(self.net[-1].bias, 0.0)
-    
+
     def forward(self, state_h: torch.Tensor) -> torch.Tensor:
         return self.net(state_h).squeeze(-1)
+
 
 class CandidateScoringMixin:
     """
@@ -577,11 +583,11 @@ class MLPPolicy(nn.Module, CandidateScoringMixin):
             state_dim=hidden, action_dim=action_hidden, hidden=hidden, activation="relu", dropout=DROPOUT_RATE
         )
         self.value_head = ValueHead(
-            in_dim=768  , 
-            hidden=768, 
+            in_dim=hidden,
+            hidden=hidden,
             activation="gelu",
-            num_layers=3,  # Try 3-4
-            dropout=0.1
+            num_layers=3,
+            dropout=0.1,
         )
         # Legacy attribute aliases (kept for backward compatibility / introspection tooling).
         # Prefer using the modular components above in new code.
@@ -610,12 +616,14 @@ class MLPPolicy(nn.Module, CandidateScoringMixin):
         values = self.value_head(state_h)  # (B,)
         return logits_list, values
 
+
 class SetAttentionBlock(nn.Module):
     """
     Self-attention block for unordered sets.
     Input:  (B, N, D)
     Output: (B, N, D)
     """
+
     def __init__(self, dim, num_heads=4, dropout=0.1):
         super().__init__()
         self.attn = nn.MultiheadAttention(
@@ -641,14 +649,15 @@ class SetAttentionBlock(nn.Module):
         # Pre-LN attention
         h = self.ln1(x)
 
-        attn_mask = None
         key_padding_mask = None
         if mask is not None:
             # MultiheadAttention expects True = pad
             key_padding_mask = ~mask
 
         attn_out, _ = self.attn(
-            h, h, h,
+            h,
+            h,
+            h,
             key_padding_mask=key_padding_mask,
             need_weights=False,
         )
@@ -692,7 +701,6 @@ class SetPoolStateEncoder(nn.Module):
         state_in = hidden * (1 + 1 + 1 + 1 + (n_players - 1))  # hand, last_play, seen, passes, opponents
         state_in += hidden  # counts
 
-
         self.state_proj = nn.Linear(state_in, hidden)
         self.state_ln = nn.LayerNorm(hidden)
         self.state_ff = nn.Sequential(
@@ -723,7 +731,7 @@ class SetPoolStateEncoder(nn.Module):
 
         hand_ids[hand_ids < 0] = self.pad_id
         hand_mask = hand_ids != self.pad_id
-        hand_emb = self.card_emb(hand_ids)          # (B, N, E)
+        hand_emb = self.card_emb(hand_ids)  # (B, N, E)
         hand_emb = self.hand_set_attn(hand_emb, hand_mask)
         hand_pool = _pool_card_embeddings(hand_emb, hand_mask)
         hand_h = self.hand_enc(hand_pool)
@@ -776,13 +784,7 @@ class SetPoolPolicy(nn.Module, CandidateScoringMixin):
         )
         self.action_encoder = ActionEncoder(hidden=action_hidden, activation="gelu", dropout=DROPOUT_RATE)
         self.policy_scorer = DotProductScorer(state_dim=hidden, action_dim=action_hidden, scale=True)
-        self.value_head = ValueHead(
-            in_dim=hidden,
-            hidden=hidden,  
-            activation="gelu",
-            num_layers=3,  
-            dropout=0.1
-        )
+        self.value_head = ValueHead(in_dim=hidden, hidden=hidden, activation="gelu", num_layers=3, dropout=0.1)
 
     def forward_state(self, state_tensor: torch.Tensor) -> torch.Tensor:
         return self.state_encoder(state_tensor)

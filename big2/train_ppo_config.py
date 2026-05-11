@@ -1,5 +1,5 @@
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from torch import nn
@@ -51,6 +51,17 @@ class PPOConfig:
     progress_reward_coef: float = 0.05
     pass_penalty: float = -0.005
 
+    # Opponent sampling. Modes:
+    # - curriculum: existing mastery-based mix of heuristics/current/checkpoints
+    # - checkpointed_self_play: mix current policy with previous checkpoints
+    # - current_self_play: use only the current policy as opponent
+    # - fixed_opponent: use only fixed_opponent_strategy
+    # - smart_only: shorthand for fixed_opponent with the smart strategy
+    opponent_mode: str = "curriculum"
+    checkpoint_self_play_current_weight: float = 0.5
+    checkpoint_self_play_checkpoint_weight: float = 0.5
+    fixed_opponent_strategy: str = "smart"
+
     # Evaluation
     eval_interval: int = 50
     eval_games: int = 500
@@ -62,6 +73,10 @@ class PPOConfig:
     seed: int = 42
     device: str = "cpu"
 
+    # Raw training history
+    history_path: str = "training_history_ppo.json"
+    history_write_every: int = 1
+
     def save(self, path: str):
         """Save config to JSON file."""
         with open(path, "w") as f:
@@ -71,7 +86,9 @@ class PPOConfig:
     def load(cls, path: str) -> "PPOConfig":
         """Load config from JSON file."""
         with open(path) as f:
-            return cls(**json.load(f))
+            data = json.load(f)
+        valid_fields = {field.name for field in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in valid_fields})
 
 
 def dump_training_run(
@@ -158,7 +175,14 @@ def dump_training_run(
             ),
             "mastery_greedy": checkpoint_manager.mastery_greedy,
             "mastery_smart": checkpoint_manager.mastery_smart,
-            "current_opponent_mix": asdict(checkpoint_manager.compute_dynamic_opponent_mix()),
+            "current_opponent_mix": asdict(
+                checkpoint_manager.compute_opponent_mix(
+                    opponent_mode=config.opponent_mode,
+                    fixed_opponent_strategy=config.fixed_opponent_strategy,
+                    checkpoint_self_play_current_weight=config.checkpoint_self_play_current_weight,
+                    checkpoint_self_play_checkpoint_weight=config.checkpoint_self_play_checkpoint_weight,
+                )
+            ),
         }
     else:
         curriculum_config = asdict(CurriculumConfig())
