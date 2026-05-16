@@ -43,6 +43,9 @@ dmypy.json
 # uv
 .uv/
 
+# Rust
+target/
+
 # Coverage
 .coverage
 htmlcov/

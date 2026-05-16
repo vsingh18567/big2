@@ -1,0 +1,15 @@
+[package]
+name = "big2-rust"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "big2_rust"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.28.3", optional = true }
