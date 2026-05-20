@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from big2.training.rust_ppo.config import OpponentMixConfig
+from big2.training.rust_ppo.config import ControllerAssignmentMode, OpponentMixConfig, TerminalRewardMode
 from big2.training.rust_ppo.env_adapter import RustBatch, RustVecEnvAdapter
 from big2.training.rust_ppo.model import RustCandidateActorCritic
 from big2.training.rust_ppo.opponents import greedy_slot, random_slot, smart_slot
@@ -43,6 +43,7 @@ class RustRolloutBuffer:
     terminal_reward_by_seat_total: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
     wins_by_seat: list[int] = field(default_factory=lambda: [0, 0, 0, 0])
     learner_entropy_by_candidate_bucket: dict[str, list[float]] = field(default_factory=lambda: defaultdict(list))
+    bootstrap_values: dict[tuple[int, int], float] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.records)
@@ -95,6 +96,21 @@ class RustRolloutBuffer:
             self.wins_by_seat[winner] += 1
 
 
+@dataclass
+class RustRolloutState:
+    """State that must survive across fixed-length rollout batches."""
+
+    episode_step_counts: list[int]
+    seat_controllers: list[list[str | None]]
+
+    @classmethod
+    def create(cls, num_envs: int) -> RustRolloutState:
+        return cls(
+            episode_step_counts=[0 for _ in range(num_envs)],
+            seat_controllers=[[None for _ in range(4)] for _ in range(num_envs)],
+        )
+
+
 def _candidate_count_bucket(count: int) -> str:
     if count <= 2:
         return "01_02"
@@ -109,6 +125,141 @@ def _candidate_count_bucket(count: int) -> str:
     return "51_plus"
 
 
+def _sample_controller(
+    *,
+    opponent_mix: OpponentMixConfig,
+    rng: random.Random,
+    checkpoint_available: bool,
+    include_learner: bool,
+) -> str:
+    names, weights = opponent_mix.normalized()
+    filtered = [
+        (name, weight)
+        for name, weight in zip(names, weights, strict=True)
+        if (include_learner or name != "learner") and (checkpoint_available or name != "checkpoint")
+    ]
+    if not filtered:
+        return "learner"
+    total = sum(weight for _name, weight in filtered)
+    if total <= 0:
+        return "learner"
+    controller_names = [name for name, _weight in filtered]
+    controller_weights = [weight / total for _name, weight in filtered]
+    return rng.choices(controller_names, weights=controller_weights, k=1)[0]
+
+
+def _assign_episode_controllers(
+    *,
+    state: RustRolloutState,
+    env_idx: int,
+    opponent_mix: OpponentMixConfig,
+    controller_assignment: ControllerAssignmentMode,
+    rng: random.Random,
+    checkpoint_available: bool,
+) -> None:
+    if controller_assignment == "turn":
+        return
+
+    if controller_assignment == "table_profile":
+        profile = _sample_controller(
+            opponent_mix=opponent_mix,
+            rng=rng,
+            checkpoint_available=checkpoint_available,
+            include_learner=True,
+        )
+        if profile == "learner":
+            state.seat_controllers[env_idx] = ["learner" for _ in range(4)]
+            return
+        learner_seat = rng.randrange(4)
+        state.seat_controllers[env_idx] = [
+            "learner" if player == learner_seat else profile for player in range(4)
+        ]
+        return
+
+    if controller_assignment in {"single_learner", "single_learner_uniform"}:
+        opponent_total = (
+            opponent_mix.random_weight
+            + opponent_mix.greedy_weight
+            + opponent_mix.smart_weight
+            + (opponent_mix.checkpoint_weight if checkpoint_available else 0.0)
+        )
+        if opponent_total <= 0:
+            state.seat_controllers[env_idx] = ["learner" for _ in range(4)]
+            return
+
+        learner_seat = rng.randrange(4)
+        uniform_opponent = (
+            _sample_controller(
+                opponent_mix=opponent_mix,
+                rng=rng,
+                checkpoint_available=checkpoint_available,
+                include_learner=False,
+            )
+            if controller_assignment == "single_learner_uniform"
+            else None
+        )
+        controllers = []
+        for player in range(4):
+            if player == learner_seat:
+                controllers.append("learner")
+            else:
+                controllers.append(
+                    uniform_opponent
+                    if uniform_opponent is not None
+                    else
+                    _sample_controller(
+                        opponent_mix=opponent_mix,
+                        rng=rng,
+                        checkpoint_available=checkpoint_available,
+                        include_learner=False,
+                    )
+                )
+        state.seat_controllers[env_idx] = controllers
+        return
+
+    state.seat_controllers[env_idx] = [
+        _sample_controller(
+            opponent_mix=opponent_mix,
+            rng=rng,
+            checkpoint_available=checkpoint_available,
+            include_learner=True,
+        )
+        for _player in range(4)
+    ]
+
+
+def _controller_for_turn(
+    *,
+    state: RustRolloutState,
+    env_idx: int,
+    player: int,
+    opponent_mix: OpponentMixConfig,
+    controller_assignment: ControllerAssignmentMode,
+    rng: random.Random,
+    checkpoint_available: bool,
+) -> str:
+    if controller_assignment == "turn":
+        return _sample_controller(
+            opponent_mix=opponent_mix,
+            rng=rng,
+            checkpoint_available=checkpoint_available,
+            include_learner=True,
+        )
+
+    controller = state.seat_controllers[env_idx][player]
+    if controller is None:
+        _assign_episode_controllers(
+            state=state,
+            env_idx=env_idx,
+            opponent_mix=opponent_mix,
+            controller_assignment=controller_assignment,
+            rng=rng,
+            checkpoint_available=checkpoint_available,
+        )
+        controller = state.seat_controllers[env_idx][player]
+    return controller or "learner"
+
+
 def collect_rollout(
     *,
     env: RustVecEnvAdapter,
@@ -119,6 +270,9 @@ def collect_rollout(
     rng: random.Random | None = None,
     initial_batch: RustBatch | None = None,
     step_penalty: float = 0.0,
+    terminal_reward_mode: TerminalRewardMode = "card_fraction",
+    controller_assignment: ControllerAssignmentMode = "turn",
+    rollout_state: RustRolloutState | None = None,
     episode_step_counts: list[int] | None = None,
 ) -> tuple[RustRolloutBuffer, RustBatch]:
     """Collect learner-controlled PPO records from a Rust vectorized env."""
@@ -126,15 +280,35 @@ def collect_rollout(
     if rng is None:
         rng = random.Random()
     checkpoint_policies = checkpoint_policies or []
-    controller_names, controller_weights = opponent_mix.normalized()
     batch = initial_batch if initial_batch is not None else env.reset()
     buffer = RustRolloutBuffer()
-    if episode_step_counts is None:
-        episode_step_counts = [0 for _ in range(batch.num_envs)]
-    elif len(episode_step_counts) != batch.num_envs:
+    if rollout_state is None:
+        rollout_state = RustRolloutState.create(batch.num_envs)
+        if episode_step_counts is not None:
+            rollout_state.episode_step_counts = episode_step_counts
+    if episode_step_counts is not None and len(episode_step_counts) != batch.num_envs:
         raise ValueError("episode_step_counts length must match env count")
+    if len(rollout_state.episode_step_counts) != batch.num_envs:
+        raise ValueError("rollout_state episode_step_counts length must match env count")
+    if len(rollout_state.seat_controllers) != batch.num_envs:
+        raise ValueError("rollout_state seat_controllers length must match env count")
+
+    checkpoint_available = bool(checkpoint_policies)
+    for env_idx in range(batch.num_envs):
+        if controller_assignment != "turn" and all(
+            controller is None for controller in rollout_state.seat_controllers[env_idx]
+        ):
+            _assign_episode_controllers(
+                state=rollout_state,
+                env_idx=env_idx,
+                opponent_mix=opponent_mix,
+                controller_assignment=controller_assignment,
+                rng=rng,
+                checkpoint_available=checkpoint_available,
+            )
 
     policy.eval()
+    latest_learner_records: dict[tuple[int, int], RustRolloutRecord] = {}
     for _ in range(steps):
         buffer.observe_candidate_counts(batch)
         action_ids = torch.zeros(batch.num_envs, dtype=torch.long, device=batch.obs.device)
@@ -148,9 +322,16 @@ def collect_rollout(
                 action_ids[env_idx] = 0
                 continue
 
-            controller = rng.choices(controller_names, weights=controller_weights, k=1)[0]
-            if controller == "checkpoint" and not checkpoint_policies:
-                controller = "learner"
+            player = int(batch.current_player[env_idx].item())
+            controller = _controller_for_turn(
+                state=rollout_state,
+                env_idx=env_idx,
+                player=player,
+                opponent_mix=opponent_mix,
+                controller_assignment=controller_assignment,
+                rng=rng,
+                checkpoint_available=checkpoint_available,
+            )
 
             if controller == "learner":
                 learner_indices.append(env_idx)
@@ -221,13 +402,10 @@ def collect_rollout(
         for env_idx in range(batch.num_envs):
             if bool(batch.done[env_idx].item()) or not bool(valid_rows[env_idx].item()):
                 continue
-            episode_step_counts[env_idx] += 1
-        for env_idx, record in pending_records.items():
+            rollout_state.episode_step_counts[env_idx] += 1
+        for record in pending_records.values():
             player = record.player
             reward = record.reward
-            done = bool(next_batch.done[env_idx].item())
-            if done:
-                reward += float(next_batch.final_rewards[env_idx, player].item())
             buffer.append(
                 RustRolloutRecord(
                     env_index=record.env_index,
@@ -240,15 +418,106 @@ def collect_rollout(
                     old_logprob=record.old_logprob,
                     value=record.value,
                     reward=reward,
-                    done=done,
+                    done=False,
                 )
             )
+            latest_learner_records[(record.env_index, record.player)] = buffer.records[-1]
 
         if done_indices:
             for env_idx in done_indices:
-                buffer.observe_terminal(next_batch.final_rewards[env_idx], episode_step_counts[env_idx])
-                episode_step_counts[env_idx] = 0
+                final_rewards = _terminal_rewards(next_batch.final_rewards[env_idx], terminal_reward_mode)
+                buffer.observe_terminal(final_rewards, rollout_state.episode_step_counts[env_idx])
+                for player in range(4):
+                    latest_record = latest_learner_records.pop((env_idx, player), None)
+                    if latest_record is not None:
+                        latest_record.reward += float(final_rewards[player].item())
+                        latest_record.done = True
+                rollout_state.episode_step_counts[env_idx] = 0
+                rollout_state.seat_controllers[env_idx] = [None for _ in range(4)]
             next_batch = env.reset_done(done_indices)
+            for env_idx in done_indices:
+                _assign_episode_controllers(
+                    state=rollout_state,
+                    env_idx=env_idx,
+                    opponent_mix=opponent_mix,
+                    controller_assignment=controller_assignment,
+                    rng=rng,
+                    checkpoint_available=checkpoint_available,
+                )
         batch = next_batch
 
+    _observe_bootstrap_values(
+        buffer=buffer,
+        batch=batch,
+        policy=policy,
+        state=rollout_state,
+        opponent_mix=opponent_mix,
+        controller_assignment=controller_assignment,
+        rng=rng,
+        checkpoint_available=checkpoint_available,
+    )
+
     return buffer, batch
+
+
+def _terminal_rewards(final_rewards: torch.Tensor, mode: TerminalRewardMode) -> torch.Tensor:
+    if mode == "card_fraction":
+        return final_rewards
+    if mode != "win_loss":
+        raise ValueError(f"Unsupported terminal_reward_mode: {mode}")
+    winner = int(final_rewards.argmax().item())
+    rewards = torch.full_like(final_rewards, -1.0)
+    if float(final_rewards[winner].item()) > 0.0:
+        rewards[winner] = 1.0
+    return rewards
+
+
+@torch.no_grad()
+def _observe_bootstrap_values(
+    *,
+    buffer: RustRolloutBuffer,
+    batch: RustBatch,
+    policy: RustCandidateActorCritic,
+    state: RustRolloutState,
+    opponent_mix: OpponentMixConfig,
+    controller_assignment: ControllerAssignmentMode,
+    rng: random.Random,
+    checkpoint_available: bool,
+) -> None:
+    if not buffer.records or controller_assignment == "turn":
+        return
+    trajectories = buffer.by_trajectory()
+    active_rows: list[int] = []
+    keys: list[tuple[int, int]] = []
+    valid_rows = batch.candidate_mask.any(dim=1)
+    for env_idx in range(batch.num_envs):
+        if bool(batch.done[env_idx].item()) or not bool(valid_rows[env_idx].item()):
+            continue
+        player = int(batch.current_player[env_idx].item())
+        key = (env_idx, player)
+        if key not in trajectories:
+            continue
+        controller = _controller_for_turn(
+            state=state,
+            env_idx=env_idx,
+            player=player,
+            opponent_mix=opponent_mix,
+            controller_assignment=controller_assignment,
+            rng=rng,
+            checkpoint_available=checkpoint_available,
+        )
+        if controller != "learner":
+            continue
+        active_rows.append(env_idx)
+        keys.append(key)
+
+    if not active_rows:
+        return
+    idx = torch.tensor(active_rows, dtype=torch.long, device=batch.obs.device)
+    _logits, values = policy(
+        batch.obs[idx],
+        batch.candidate_ids[idx],
+        batch.candidate_mask[idx],
+    )
+    for key, value in zip(keys, values.detach().cpu().tolist(), strict=True):
+        buffer.bootstrap_values[key] = float(value)

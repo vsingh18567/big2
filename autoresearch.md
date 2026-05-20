@@ -22,7 +22,7 @@ The current run configuration is roughly:
 - eval every `25` batches
 - eval uses `256` games per seat, `4` seats, so `1024` aggregate games per opponent
 
-Although docs/wiki recommends `max_candidates=2048` for serious runs, the current `256`-candidate baseline showed `truncated_candidate_lists=0` through the observed batches. Keep `256` for exploratory A/B tests unless truncation appears, because it preserves the measured throughput. If any run logs nonzero truncation, treat that run as candidate-limited and rerun the hypothesis with a larger candidate width. For final confirmation runs, consider repeating the best configuration at a larger `max_candidates` value if memory/runtime allow.
+Although docs/wiki recommends `max_candidates=2048` for serious runs, the current `256`-candidate baseline showed `truncated_candidate_lists=0` through the observed batches. Keep `256` for exploratory A/B tests unless truncation appears, because it preserves the measured throughput. If any run logs nonzero truncation, treat that run as candidate-limited and rerun the hypothesis with a larger candidate width. 
 
 Observed runtime from the current CPU run:
 
@@ -82,8 +82,10 @@ Before comparing new ideas, establish a reference from the existing metrics file
 
 This research process should run autonomously. Do not ask the user for help choosing hypotheses, commands, worktree names, logging formats, or next steps. Make reasonable decisions from the repo, current metrics, and experiment results. If something fails, debug it locally, record the failure, and either fix it or move to the next hypothesis. Only stop for user input if continuing would require destructive actions, external credentials, unavailable hardware, or a genuinely ambiguous operation that could damage existing work.
 
+Feel free to do long sleeps while waiting.
+
 ## Subagent Strategy
-Use subagents deliberately to increase throughput. Treat each subagent as the owner of one hypothesis or one bounded analysis task. Use gpt 5.5 medium for subagents. 
+Use subagents deliberately to increase throughput. Treat each subagent as the owner of one hypothesis or one bounded analysis task. Use gpt 5.5 with high effort for any subagents that are doing any creative work, medium effort for executing on a hypothesis / other simpler tasks. 
 
 Good subagent assignments:
 
@@ -160,3 +162,6 @@ For each run, record:
 - conclusion: promote, reject, continue longer, or follow-up hypothesis
 
 At the end, summarize the top candidates and recommend the next long run configuration.
+
+## Focus
+Don't execute commands that aren't tied to this goal.

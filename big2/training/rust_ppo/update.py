@@ -40,10 +40,11 @@ def compute_gae(
     *,
     gamma: float,
     lam: float,
+    bootstrap_value: float | torch.Tensor = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     advantages = torch.zeros_like(rewards)
     gae = torch.tensor(0.0, dtype=torch.float32, device=rewards.device)
-    next_value = torch.tensor(0.0, dtype=torch.float32, device=rewards.device)
+    next_value = torch.as_tensor(bootstrap_value, dtype=torch.float32, device=rewards.device)
     for idx in range(rewards.numel() - 1, -1, -1):
         not_done = 1.0 - dones[idx]
         delta = rewards[idx] + gamma * next_value * not_done - values[idx]
@@ -83,11 +84,12 @@ def ppo_update(
     advantages_by_index: dict[int, torch.Tensor] = {}
     returns_by_index: dict[int, torch.Tensor] = {}
     record_offset = {id(record): idx for idx, record in enumerate(records)}
-    for trajectory in buffer.by_trajectory().values():
+    for trajectory_key, trajectory in buffer.by_trajectory().items():
         rewards = torch.tensor([record.reward for record in trajectory], dtype=torch.float32, device=device)
         values = torch.stack([record.value for record in trajectory]).float().to(device)
         dones = torch.tensor([record.done for record in trajectory], dtype=torch.float32, device=device)
-        adv, ret = compute_gae(rewards, values, dones, gamma=gamma, lam=lam)
+        bootstrap_value = 0.0 if bool(dones[-1].item()) else buffer.bootstrap_values.get(trajectory_key, 0.0)
+        adv, ret = compute_gae(rewards, values, dones, gamma=gamma, lam=lam, bootstrap_value=bootstrap_value)
         for local_idx, record in enumerate(trajectory):
             global_idx = record_offset[id(record)]
             advantages_by_index[global_idx] = adv[local_idx]

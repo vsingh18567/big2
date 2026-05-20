@@ -5,31 +5,77 @@ import json
 import random
 import statistics
 import subprocess
+import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
 
-from big2.training.rust_ppo.checkpoints import find_latest_checkpoint, load_checkpoint, save_checkpoint
+from big2.training.rust_ppo.checkpoints import (
+    find_latest_checkpoint,
+    load_checkpoint,
+    load_checkpoint_partial,
+    save_checkpoint,
+)
 from big2.training.rust_ppo.config import LoggingMode, OpponentMixConfig, RustPPOConfig
+from big2.training.rust_ppo.curriculum import (
+    TrainingControls,
+    smart_greedy_score_from_evals,
+    training_controls_for_batch,
+)
 from big2.training.rust_ppo.env_adapter import RustVecEnvAdapter
 from big2.training.rust_ppo.evaluate import evaluate_policy
 from big2.training.rust_ppo.model import RustCandidateActorCritic
-from big2.training.rust_ppo.rollout import collect_rollout
+from big2.training.rust_ppo.rollout import RustRolloutState, collect_rollout
 from big2.training.rust_ppo.update import ppo_update
 
+SMART_GREEDY_DEFAULT_MIX = OpponentMixConfig(
+    learner_weight=0.75,
+    random_weight=0.10,
+    greedy_weight=0.10,
+    smart_weight=0.05,
+)
+OPPONENT_WEIGHT_ARGS = {
+    "--learner-weight",
+    "--random-weight",
+    "--greedy-weight",
+    "--smart-weight",
+    "--checkpoint-opponent-weight",
+}
 
-def build_policy(env: RustVecEnvAdapter, config: RustPPOConfig) -> RustCandidateActorCritic:
+
+@dataclass(frozen=True)
+class CheckpointOpponentPool:
+    policies: list[RustCandidateActorCritic]
+    paths: list[Path]
+
+
+def build_policy(
+    env: RustVecEnvAdapter,
+    config: RustPPOConfig,
+    *,
+    obs_dim: int | None = None,
+    candidate_set_context: bool | None = None,
+    dynamic_action_features: bool | None = None,
+) -> RustCandidateActorCritic:
+    if obs_dim is None:
+        obs_dim = env.reset().obs_dim
+    if candidate_set_context is None:
+        candidate_set_context = config.candidate_set_context
+    if dynamic_action_features is None:
+        dynamic_action_features = config.dynamic_action_features
     return RustCandidateActorCritic(
-        obs_dim=env.reset().obs_dim,
+        obs_dim=obs_dim,
         num_actions=env.num_actions,
         move_features=env.metadata.as_tensor(config.device),
         obs_hidden=config.obs_hidden,
         action_emb_dim=config.action_emb_dim,
         action_feature_hidden=config.action_feature_hidden,
         action_hidden=config.action_hidden,
+        candidate_set_context=candidate_set_context,
+        dynamic_action_features=dynamic_action_features,
     ).to(config.device)
 
 
@@ -42,17 +88,20 @@ def run_smoke(config: RustPPOConfig) -> None:
         max_candidates=config.max_candidates,
         device=config.device,
     )
-    policy = build_policy(env, config)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=config.lr)
     batch = env.reset()
+    policy = build_policy(env, config, obs_dim=batch.obs_dim)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=config.lr)
+    controls = training_controls_for_batch(config, batch_idx=1, latest_smart_greedy_score=None)
     buffer, _batch = collect_rollout(
         env=env,
         policy=policy,
         steps=config.rollout_steps,
-        opponent_mix=config.opponent_mix,
+        opponent_mix=controls.opponent_mix,
         rng=rng,
         initial_batch=batch,
         step_penalty=config.step_penalty,
+        terminal_reward_mode=config.terminal_reward_mode,
+        controller_assignment=config.controller_assignment,
     )
     stats = ppo_update(
         policy=policy,
@@ -64,7 +113,7 @@ def run_smoke(config: RustPPOConfig) -> None:
         gamma=config.gamma,
         lam=config.lam,
         value_coef=config.value_coef,
-        entropy_coef=config.entropy_coef,
+        entropy_coef=controls.entropy_coef,
         max_grad_norm=config.max_grad_norm,
         device=config.device,
     )
@@ -80,8 +129,11 @@ def run_training(config: RustPPOConfig, *, resume: bool = False) -> None:
         max_candidates=config.max_candidates,
         device=config.device,
     )
-    policy = build_policy(env, config)
+    batch = env.reset()
+    policy = build_policy(env, config, obs_dim=batch.obs_dim)
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.lr)
+    metrics_path = Path(config.metrics_path)
+    latest_smart_greedy_score = _latest_smart_greedy_score_from_metrics(metrics_path) if resume else None
     start_batch = 1
 
     if resume:
@@ -89,11 +141,15 @@ def run_training(config: RustPPOConfig, *, resume: bool = False) -> None:
         if latest is not None:
             payload = load_checkpoint(path=latest, policy=policy, optimizer=optimizer, map_location=config.device)
             start_batch = int(payload["batch"]) + 1
+            if latest_smart_greedy_score is None:
+                latest_smart_greedy_score = smart_greedy_score_from_evals(payload.get("metrics", {}).get("eval"))
+    elif config.init_checkpoint is not None:
+        payload = load_checkpoint_partial(path=config.init_checkpoint, policy=policy, map_location=config.device)
+        latest_smart_greedy_score = smart_greedy_score_from_evals(payload.get("metrics", {}).get("eval"))
 
-    metrics_path = Path(config.metrics_path)
+    checkpoint_opponent_pool = _load_checkpoint_opponent_pool(env, config, obs_dim=batch.obs_dim)
     metrics_path.parent.mkdir(parents=True, exist_ok=True) if metrics_path.parent != Path("") else None
-    batch = env.reset()
-    episode_step_counts = [0 for _ in range(config.num_envs)]
+    rollout_state = RustRolloutState.create(config.num_envs)
     config_row = {
         "event": "config",
         "config": asdict(config),
@@ -104,17 +160,25 @@ def run_training(config: RustPPOConfig, *, resume: bool = False) -> None:
     _print_row(config_row, config.logging_mode)
 
     for batch_idx in range(start_batch, config.batches + 1):
+        controls = training_controls_for_batch(
+            config,
+            batch_idx=batch_idx,
+            latest_smart_greedy_score=latest_smart_greedy_score,
+        )
         batch_started_at = time.perf_counter()
         rollout_started_at = time.perf_counter()
         buffer, batch = collect_rollout(
             env=env,
             policy=policy,
             steps=config.rollout_steps,
-            opponent_mix=config.opponent_mix,
+            opponent_mix=controls.opponent_mix,
             rng=rng,
             initial_batch=batch,
             step_penalty=config.step_penalty,
-            episode_step_counts=episode_step_counts,
+            terminal_reward_mode=config.terminal_reward_mode,
+            controller_assignment=config.controller_assignment,
+            rollout_state=rollout_state,
+            checkpoint_policies=checkpoint_opponent_pool.policies,
         )
         rollout_seconds = time.perf_counter() - rollout_started_at
         update_started_at = time.perf_counter()
@@ -128,7 +192,7 @@ def run_training(config: RustPPOConfig, *, resume: bool = False) -> None:
             gamma=config.gamma,
             lam=config.lam,
             value_coef=config.value_coef,
-            entropy_coef=config.entropy_coef,
+            entropy_coef=controls.entropy_coef,
             max_grad_norm=config.max_grad_norm,
             device=config.device,
         )
@@ -141,6 +205,8 @@ def run_training(config: RustPPOConfig, *, resume: bool = False) -> None:
             config=config,
             rollout_seconds=rollout_seconds,
             update_seconds=update_seconds,
+            controls=controls,
+            checkpoint_opponent_pool=checkpoint_opponent_pool,
         )
 
         eval_seconds = 0.0
@@ -149,6 +215,18 @@ def run_training(config: RustPPOConfig, *, resume: bool = False) -> None:
             evals = _run_evals(policy=policy, config=config, batch_idx=batch_idx)
             eval_seconds = time.perf_counter() - eval_started_at
             row["eval"] = evals
+            score = smart_greedy_score_from_evals(evals)
+            if score is not None:
+                latest_smart_greedy_score = score
+                row["training_controls"]["eval_smart_greedy_score"] = score
+                next_controls = training_controls_for_batch(
+                    config,
+                    batch_idx=batch_idx + 1,
+                    latest_smart_greedy_score=latest_smart_greedy_score,
+                )
+                row["training_controls"]["next_curriculum_phase"] = next_controls.curriculum_phase
+                row["training_controls"]["next_entropy_coef"] = next_controls.entropy_coef
+                row["training_controls"]["next_opponent_mix"] = asdict(next_controls.opponent_mix)
 
         checkpoint_seconds = 0.0
         if config.checkpoint_interval > 0 and batch_idx % config.checkpoint_interval == 0:
@@ -163,6 +241,8 @@ def run_training(config: RustPPOConfig, *, resume: bool = False) -> None:
             )
             checkpoint_seconds = time.perf_counter() - checkpoint_started_at
             row["checkpoint_path"] = str(path)
+            if config.checkpoint_opponent_refresh:
+                checkpoint_opponent_pool = _load_checkpoint_opponent_pool(env, config, obs_dim=batch.obs_dim)
 
         row["timing"]["eval_seconds"] = eval_seconds
         row["timing"]["checkpoint_seconds"] = checkpoint_seconds
@@ -180,7 +260,12 @@ def _build_training_row(
     config: RustPPOConfig,
     rollout_seconds: float,
     update_seconds: float,
+    controls: TrainingControls | None = None,
+    checkpoint_opponent_pool: CheckpointOpponentPool | None = None,
 ) -> dict[str, Any]:
+    if controls is None:
+        controls = training_controls_for_batch(config, batch_idx=batch_idx, latest_smart_greedy_score=None)
+    checkpoint_opponent_paths = checkpoint_opponent_pool.paths if checkpoint_opponent_pool is not None else []
     row: dict[str, Any] = {
         "event": "batch",
         "batch": batch_idx,
@@ -194,7 +279,11 @@ def _build_training_row(
         "candidate_count_rows": buffer.candidate_count_rows,
         "truncated_candidate_lists": buffer.truncated_candidate_lists,
         "max_candidates": config.max_candidates,
+        "training_controls": controls.as_metrics(),
+        "controller_assignment": config.controller_assignment,
     }
+    row["training_controls"]["checkpoint_opponent_pool_size"] = len(checkpoint_opponent_paths)
+    row["training_controls"]["checkpoint_opponent_paths"] = [str(path) for path in checkpoint_opponent_paths]
     if config.logging_mode in {"medium", "max"}:
         row.update(
             {
@@ -312,9 +401,91 @@ def _run_evals(*, policy: RustCandidateActorCritic, config: RustPPOConfig, batch
     return evals
 
 
+def _load_checkpoint_opponent_pool(
+    env: RustVecEnvAdapter,
+    config: RustPPOConfig,
+    *,
+    obs_dim: int,
+) -> CheckpointOpponentPool:
+    paths = _checkpoint_opponent_paths(config)
+    policies: list[RustCandidateActorCritic] = []
+    for path in paths:
+        opponent = build_policy(
+            env,
+            config,
+            obs_dim=obs_dim,
+            candidate_set_context=_checkpoint_uses_candidate_set_context(path, device=config.device),
+            dynamic_action_features=_checkpoint_uses_dynamic_action_features(path, device=config.device),
+        )
+        load_checkpoint(path=path, policy=opponent, optimizer=None, map_location=config.device)
+        opponent.eval()
+        for param in opponent.parameters():
+            param.requires_grad_(False)
+        policies.append(opponent)
+    return CheckpointOpponentPool(policies=policies, paths=paths)
+
+
+def _checkpoint_uses_candidate_set_context(path: Path, *, device: str) -> bool:
+    payload = torch.load(path, map_location=device)
+    return any(key.startswith("candidate_context_projection.") for key in payload.get("model_state", {}))
+
+
+def _checkpoint_uses_dynamic_action_features(path: Path, *, device: str) -> bool:
+    payload = torch.load(path, map_location=device)
+    return any(key.startswith("candidate_outcome_encoder.") for key in payload.get("model_state", {}))
+
+
+def _checkpoint_opponent_paths(config: RustPPOConfig) -> list[Path]:
+    source_dir = Path(config.checkpoint_opponent_dir or config.checkpoint_dir)
+    if not source_dir.exists():
+        return []
+    paths = []
+    for path in source_dir.glob("batch_*.pt"):
+        batch = _checkpoint_batch(path)
+        if batch is None:
+            continue
+        if config.checkpoint_opponent_stride > 1 and batch % config.checkpoint_opponent_stride != 0:
+            continue
+        paths.append((batch, path))
+    paths.sort(key=lambda item: item[0])
+    selected = [path for _batch, path in paths]
+    if config.checkpoint_opponent_limit > 0:
+        selected = selected[-config.checkpoint_opponent_limit :]
+    return selected
+
+
+def _checkpoint_batch(path: Path) -> int | None:
+    stem = path.stem
+    if not stem.startswith("batch_"):
+        return None
+    try:
+        return int(stem.removeprefix("batch_"))
+    except ValueError:
+        return None
+
+
 def _write_metrics_row(metrics_path: Path, row: dict[str, Any]) -> None:
     with metrics_path.open("a") as handle:
         handle.write(json.dumps(row) + "\n")
+
+
+def _latest_smart_greedy_score_from_metrics(metrics_path: Path) -> float | None:
+    if not metrics_path.exists():
+        return None
+    latest_score: float | None = None
+    with metrics_path.open() as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            score = smart_greedy_score_from_evals(row.get("eval"))
+            if score is not None:
+                latest_score = score
+    return latest_score
 
 
 def _print_row(row: dict[str, Any], logging_mode: LoggingMode) -> None:
@@ -394,14 +565,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ppo-epochs", type=int, default=2)
     parser.add_argument("--mini-batch-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--candidate-set-context", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--dynamic-action-features", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--entropy-schedule", choices=("constant", "linear"), default="constant")
+    parser.add_argument("--entropy-start-coef", type=float, default=None)
+    parser.add_argument("--entropy-end-coef", type=float, default=None)
+    parser.add_argument("--entropy-schedule-batches", type=int, default=0)
+    parser.add_argument("--terminal-reward-mode", choices=("card-fraction", "win-loss"), default="card-fraction")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--greedy-weight", type=float, default=0.0)
     parser.add_argument("--smart-weight", type=float, default=0.0)
     parser.add_argument("--random-weight", type=float, default=0.0)
     parser.add_argument("--learner-weight", type=float, default=1.0)
+    parser.add_argument("--checkpoint-opponent-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--controller-assignment",
+        choices=("turn", "episode-seat", "single-learner", "single-learner-uniform", "table-profile"),
+        default="turn",
+    )
+    parser.add_argument("--curriculum", choices=("off", "smart-greedy"), default="off")
     parser.add_argument("--checkpoint-dir", default="rust_ppo_checkpoints")
+    parser.add_argument("--init-checkpoint", default=None)
     parser.add_argument("--checkpoint-interval", type=int, default=10)
+    parser.add_argument("--checkpoint-opponent-dir", default=None)
+    parser.add_argument("--checkpoint-opponent-limit", type=int, default=4)
+    parser.add_argument("--checkpoint-opponent-stride", type=int, default=25)
+    parser.add_argument("--checkpoint-opponent-refresh", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--metrics-path", default="rust_ppo_metrics.jsonl")
     parser.add_argument("--eval-interval", type=int, default=10)
     parser.add_argument("--eval-games", type=int, default=64)
@@ -409,11 +600,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-policy-seat", type=int, default=0)
     parser.add_argument("--eval-all-seats", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--logging-mode", choices=("minimal", "medium", "max"), default="medium")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.opponent_weights_explicit = _opponent_weights_explicit()
+    return args
+
+
+def _opponent_weights_explicit() -> bool:
+    return any(arg == option or arg.startswith(f"{option}=") for arg in sys.argv[1:] for option in OPPONENT_WEIGHT_ARGS)
+
+
+def _opponent_mix_from_args(args: argparse.Namespace) -> OpponentMixConfig:
+    if args.curriculum == "smart-greedy" and not args.opponent_weights_explicit:
+        return SMART_GREEDY_DEFAULT_MIX
+    return OpponentMixConfig(
+        learner_weight=args.learner_weight,
+        random_weight=args.random_weight,
+        greedy_weight=args.greedy_weight,
+        smart_weight=args.smart_weight,
+        checkpoint_weight=args.checkpoint_opponent_weight,
+    )
 
 
 def main() -> None:
     args = parse_args()
+    opponent_mix = _opponent_mix_from_args(args)
     config = RustPPOConfig(
         num_envs=args.num_envs,
         batches=args.batches,
@@ -422,10 +632,23 @@ def main() -> None:
         ppo_epochs=args.ppo_epochs,
         mini_batch_size=args.mini_batch_size,
         lr=args.lr,
+        candidate_set_context=args.candidate_set_context,
+        dynamic_action_features=args.dynamic_action_features,
+        entropy_coef=args.entropy_coef,
+        entropy_schedule=args.entropy_schedule,
+        entropy_start_coef=args.entropy_start_coef,
+        entropy_end_coef=args.entropy_end_coef,
+        entropy_schedule_batches=args.entropy_schedule_batches,
+        terminal_reward_mode=args.terminal_reward_mode.replace("-", "_"),
         device=args.device,
         seed=args.seed,
         checkpoint_dir=args.checkpoint_dir,
+        init_checkpoint=args.init_checkpoint,
         checkpoint_interval=args.checkpoint_interval,
+        checkpoint_opponent_dir=args.checkpoint_opponent_dir,
+        checkpoint_opponent_limit=args.checkpoint_opponent_limit,
+        checkpoint_opponent_stride=args.checkpoint_opponent_stride,
+        checkpoint_opponent_refresh=args.checkpoint_opponent_refresh,
         metrics_path=args.metrics_path,
         eval_interval=args.eval_interval,
         eval_games=args.eval_games,
@@ -433,12 +656,9 @@ def main() -> None:
         eval_policy_seat=args.eval_policy_seat,
         eval_all_seats=args.eval_all_seats,
         logging_mode=args.logging_mode,
-        opponent_mix=OpponentMixConfig(
-            learner_weight=args.learner_weight,
-            random_weight=args.random_weight,
-            greedy_weight=args.greedy_weight,
-            smart_weight=args.smart_weight,
-        ),
+        curriculum=args.curriculum.replace("-", "_"),
+        controller_assignment=args.controller_assignment.replace("-", "_"),
+        opponent_mix=opponent_mix,
     )
     if args.train:
         run_training(config, resume=args.resume)

@@ -6,6 +6,24 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+OWN_HAND_START = 0
+OWN_HAND_END = 52
+MOVE_CARD_MASK_START = 0
+MOVE_CARD_MASK_END = 52
+MOVE_KIND_START = 52
+MOVE_KIND_END = 61
+MOVE_PRIMARY_RANK_START = 62
+MOVE_PRIMARY_RANK_END = 75
+MOVE_HIGH_SUIT_START = 88
+MOVE_HIGH_SUIT_END = 92
+OBS_LAST_MOVE_KIND_START = 104
+OBS_LAST_MOVE_KIND_END = 113
+OBS_LAST_MOVE_PRIMARY_RANK = 114
+OBS_LAST_MOVE_HIGH_SUIT_START = 116
+OBS_LAST_MOVE_HIGH_SUIT_END = 120
+OBS_FREE_LEAD = 128
+DYNAMIC_ACTION_FEATURE_DIM = 92
+
 
 @dataclass(frozen=True)
 class ActionSelection:
@@ -29,10 +47,14 @@ class RustCandidateActorCritic(nn.Module):
         action_emb_dim: int = 128,
         action_feature_hidden: int = 128,
         action_hidden: int = 256,
+        candidate_set_context: bool = False,
+        dynamic_action_features: bool = False,
     ):
         super().__init__()
         self.obs_dim = obs_dim
         self.num_actions = num_actions
+        self.candidate_set_context = candidate_set_context
+        self.dynamic_action_features = dynamic_action_features
 
         self.register_buffer("move_features", move_features.float())
         move_feature_dim = int(move_features.shape[1])
@@ -51,12 +73,43 @@ class RustCandidateActorCritic(nn.Module):
             nn.ReLU(),
             nn.LayerNorm(action_feature_hidden),
         )
+        action_input_dim = action_emb_dim + action_feature_hidden
+        if dynamic_action_features:
+            self.candidate_outcome_encoder = nn.Sequential(
+                nn.Linear(DYNAMIC_ACTION_FEATURE_DIM, action_feature_hidden),
+                nn.ReLU(),
+                nn.LayerNorm(action_feature_hidden),
+            )
+            action_input_dim += action_feature_hidden
+            rank_projection = torch.zeros(52, 13)
+            suit_projection = torch.zeros(52, 4)
+            for card in range(52):
+                rank_projection[card, card // 4] = 1.0
+                suit_projection[card, card % 4] = 1.0
+            self.register_buffer("card_rank_projection", rank_projection)
+            self.register_buffer("card_suit_projection", suit_projection)
+            self.register_buffer("rank_values", torch.arange(13, dtype=torch.float32))
+            self.register_buffer("kind_values", torch.arange(9, dtype=torch.float32))
+            self.register_buffer("suit_values", torch.arange(4, dtype=torch.float32))
         self.action_projection = nn.Sequential(
-            nn.Linear(action_emb_dim + action_feature_hidden, action_hidden),
+            nn.Linear(action_input_dim, action_hidden),
             nn.ReLU(),
             nn.LayerNorm(action_hidden),
         )
         self.state_to_action = nn.Linear(obs_hidden, action_hidden)
+        if candidate_set_context:
+            self.candidate_context_projection = nn.Sequential(
+                nn.Linear(action_hidden * 2, action_hidden),
+                nn.ReLU(),
+                nn.LayerNorm(action_hidden),
+                nn.Linear(action_hidden, action_hidden),
+            )
+            self.candidate_value_projection = nn.Sequential(
+                nn.Linear(action_hidden * 2, obs_hidden),
+                nn.ReLU(),
+                nn.LayerNorm(obs_hidden),
+                nn.Linear(obs_hidden, obs_hidden),
+            )
         self.value_head = nn.Sequential(
             nn.Linear(obs_hidden, obs_hidden),
             nn.ReLU(),
@@ -73,14 +126,112 @@ class RustCandidateActorCritic(nn.Module):
         values = self.value_head(state_h).squeeze(-1)
 
         safe_ids = candidate_ids.clamp_min(0)
+        selected_move_features = self.move_features[safe_ids]
         id_emb = self.move_id_embedding(safe_ids)
-        feature_emb = self.move_feature_encoder(self.move_features[safe_ids])
-        action_h = self.action_projection(torch.cat([id_emb, feature_emb], dim=-1))
+        feature_emb = self.move_feature_encoder(selected_move_features)
+        action_inputs = [id_emb, feature_emb]
+        if self.dynamic_action_features:
+            candidate_outcome_features = self._candidate_outcome_features(obs.float(), selected_move_features)
+            action_inputs.append(self.candidate_outcome_encoder(candidate_outcome_features.float()))
+        action_h = self.action_projection(torch.cat(action_inputs, dim=-1))
 
-        state_action_h = self.state_to_action(state_h).unsqueeze(1)
-        logits = (state_action_h * action_h).sum(dim=-1) / (action_h.shape[-1] ** 0.5)
+        if self.candidate_set_context:
+            candidate_summary = self._candidate_set_summary(action_h, candidate_mask)
+            state_action_base = self.state_to_action(state_h)
+            state_action_h = state_action_base + self.candidate_context_projection(candidate_summary)
+            values = self.value_head(state_h + self.candidate_value_projection(candidate_summary)).squeeze(-1)
+        else:
+            state_action_h = self.state_to_action(state_h)
+        logits = (state_action_h.unsqueeze(1) * action_h).sum(dim=-1) / (action_h.shape[-1] ** 0.5)
         logits = logits.masked_fill(~candidate_mask, -1.0e9)
         return logits, values
+
+    def _candidate_outcome_features(
+        self,
+        obs: torch.Tensor,
+        selected_move_features: torch.Tensor,
+    ) -> torch.Tensor:
+        own_hand = obs[:, OWN_HAND_START:OWN_HAND_END].unsqueeze(1)
+        move_mask = selected_move_features[..., MOVE_CARD_MASK_START:MOVE_CARD_MASK_END].clamp(0.0, 1.0)
+        remaining = (own_hand * (1.0 - move_mask)).clamp(0.0, 1.0)
+
+        rank_counts = remaining @ self.card_rank_projection
+        suit_counts = remaining @ self.card_suit_projection
+        remaining_count = remaining.sum(dim=-1, keepdim=True)
+        played_count = move_mask.sum(dim=-1, keepdim=True)
+        current_count = own_hand.sum(dim=-1, keepdim=True).clamp_min(1.0)
+
+        move_kind = selected_move_features[..., MOVE_KIND_START:MOVE_KIND_END]
+        is_pass = move_kind[..., 0:1]
+        rank_present = rank_counts > 0.0
+        rank_values = self.rank_values.view(1, 1, 13)
+        high_rank = torch.where(rank_present, rank_values, torch.full_like(rank_counts, -1.0)).max(dim=-1).values
+        low_rank = torch.where(rank_present, rank_values, torch.full_like(rank_counts, 13.0)).min(dim=-1).values
+
+        free_lead = obs[:, OBS_FREE_LEAD : OBS_FREE_LEAD + 1].unsqueeze(1)
+        free_lead_feature = free_lead.expand(-1, selected_move_features.shape[1], -1)
+        is_response = (1.0 - free_lead) * (1.0 - is_pass)
+        last_kind = obs[:, OBS_LAST_MOVE_KIND_START:OBS_LAST_MOVE_KIND_END].unsqueeze(1)
+        same_kind = (move_kind * last_kind).sum(dim=-1, keepdim=True) * is_response
+        move_kind_idx = (move_kind * self.kind_values.view(1, 1, 9)).sum(dim=-1, keepdim=True)
+        last_kind_idx = (last_kind * self.kind_values.view(1, 1, 9)).sum(dim=-1, keepdim=True)
+        kind_delta = ((move_kind_idx - last_kind_idx) / 8.0) * is_response
+
+        move_primary_rank = (
+            selected_move_features[..., MOVE_PRIMARY_RANK_START:MOVE_PRIMARY_RANK_END]
+            * self.rank_values.view(1, 1, 13)
+        ).sum(dim=-1, keepdim=True) / 12.0
+        last_primary_rank = obs[:, OBS_LAST_MOVE_PRIMARY_RANK : OBS_LAST_MOVE_PRIMARY_RANK + 1].unsqueeze(1)
+        primary_rank_delta = (move_primary_rank - last_primary_rank) * same_kind
+        move_high_suit = (
+            selected_move_features[..., MOVE_HIGH_SUIT_START:MOVE_HIGH_SUIT_END]
+            * self.suit_values.view(1, 1, 4)
+        ).sum(dim=-1, keepdim=True) / 3.0
+        last_high_suit = (
+            obs[:, OBS_LAST_MOVE_HIGH_SUIT_START:OBS_LAST_MOVE_HIGH_SUIT_END].unsqueeze(1)
+            * self.suit_values.view(1, 1, 4)
+        ).sum(dim=-1, keepdim=True) / 3.0
+        high_suit_delta = (move_high_suit - last_high_suit) * same_kind
+
+        scalar_features = torch.cat(
+            [
+                remaining_count / 13.0,
+                played_count / 5.0,
+                played_count / current_count,
+                is_pass,
+                (remaining_count <= 0.0).float(),
+                (remaining_count == 1.0).float(),
+                (remaining_count == 2.0).float(),
+                (remaining_count <= 3.0).float(),
+                (rank_counts == 1.0).float().sum(dim=-1, keepdim=True) / 13.0,
+                (rank_counts == 2.0).float().sum(dim=-1, keepdim=True) / 13.0,
+                (rank_counts == 3.0).float().sum(dim=-1, keepdim=True) / 13.0,
+                (rank_counts == 4.0).float().sum(dim=-1, keepdim=True) / 13.0,
+                torch.clamp(high_rank + 1.0, min=0.0).unsqueeze(-1) / 13.0,
+                torch.where(low_rank < 13.0, (low_rank + 1.0) / 13.0, torch.zeros_like(low_rank)).unsqueeze(-1),
+                rank_counts[..., 12:13] / 4.0,
+                rank_counts[..., 9:13].sum(dim=-1, keepdim=True) / 16.0,
+                rank_counts[..., 0:4].sum(dim=-1, keepdim=True) / 16.0,
+                free_lead_feature,
+                is_response,
+                same_kind,
+                kind_delta,
+                primary_rank_delta,
+                high_suit_delta,
+            ],
+            dim=-1,
+        )
+        return torch.cat([remaining, rank_counts / 4.0, suit_counts / 13.0, scalar_features], dim=-1)
+
+    @staticmethod
+    def _candidate_set_summary(action_h: torch.Tensor, candidate_mask: torch.Tensor) -> torch.Tensor:
+        mask = candidate_mask.unsqueeze(-1)
+        counts = mask.sum(dim=1).clamp_min(1)
+        mean = action_h.masked_fill(~mask, 0.0).sum(dim=1) / counts
+        masked_for_max = action_h.masked_fill(~mask, torch.finfo(action_h.dtype).min)
+        max_values = masked_for_max.max(dim=1).values
+        max_values = torch.where(torch.isfinite(max_values), max_values, torch.zeros_like(max_values))
+        return torch.cat([mean, max_values], dim=-1)
 
     def distribution(
         self,
