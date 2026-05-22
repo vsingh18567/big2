@@ -56,7 +56,6 @@ Useful targeted suites:
 ```sh
 uv run pytest big2/simulator/tests -v
 uv run pytest big2/game_server/test_api.py -v
-uv run pytest big2/1/tests -v
 ```
 
 Run all currently discoverable Python tests:
