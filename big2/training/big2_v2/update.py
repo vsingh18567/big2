@@ -6,8 +6,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from big2.training.rust_ppo.model import RustCandidateActorCritic
-from big2.training.rust_ppo.rollout import RustRolloutBuffer
+from big2.training.big2_v2.model import Big2V2ActorCritic
+from big2.training.big2_v2.rollout import Big2V2RolloutBuffer
 
 
 @dataclass(frozen=True)
@@ -57,8 +57,8 @@ def compute_gae(
 
 def ppo_update(
     *,
-    policy: RustCandidateActorCritic,
-    buffer: RustRolloutBuffer,
+    policy: Big2V2ActorCritic,
+    buffer: Big2V2RolloutBuffer,
     optimizer: torch.optim.Optimizer,
     ppo_epochs: int,
     mini_batch_size: int,

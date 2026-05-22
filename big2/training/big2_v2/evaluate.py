@@ -5,9 +5,9 @@ from dataclasses import dataclass
 
 import torch
 
-from big2.training.rust_ppo.env_adapter import RustVecEnvAdapter
-from big2.training.rust_ppo.model import RustCandidateActorCritic
-from big2.training.rust_ppo.opponents import greedy_slot, smart_slot
+from big2.training.big2_v2.env_adapter import RustVecEnvAdapter
+from big2.training.big2_v2.model import Big2V2ActorCritic
+from big2.training.big2_v2.opponents import greedy_slot, smart_slot
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ class EvalResult:
 @torch.no_grad()
 def evaluate_policy(
     *,
-    policy: RustCandidateActorCritic,
+    policy: Big2V2ActorCritic,
     opponent: str,
     games: int,
     num_envs: int,

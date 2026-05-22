@@ -4,7 +4,7 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from big2.training.rust_ppo.config import OpponentMixConfig, RustPPOConfig
+from big2.training.big2_v2.config import OpponentMixConfig, Big2V2Config
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ class TrainingControls:
 
 
 def training_controls_for_batch(
-    config: RustPPOConfig,
+    config: Big2V2Config,
     *,
     batch_idx: int,
     latest_smart_greedy_score: float | None,
@@ -61,7 +61,7 @@ def training_controls_for_batch(
     )
 
 
-def entropy_coef_for_batch(config: RustPPOConfig, *, batch_idx: int) -> float:
+def entropy_coef_for_batch(config: Big2V2Config, *, batch_idx: int) -> float:
     if config.entropy_schedule == "constant":
         return config.entropy_coef
     if config.entropy_schedule != "linear":
@@ -92,7 +92,7 @@ def smart_greedy_score_from_evals(evals: dict[str, Any] | None) -> float | None:
     return score if math.isfinite(score) else None
 
 
-def smart_greedy_phase(config: RustPPOConfig, score: float | None) -> CurriculumPhase:
+def smart_greedy_phase(config: Big2V2Config, score: float | None) -> CurriculumPhase:
     phases = smart_greedy_phases(config)
     if score is None:
         return phases[0]
@@ -104,7 +104,7 @@ def smart_greedy_phase(config: RustPPOConfig, score: float | None) -> Curriculum
     return selected
 
 
-def smart_greedy_phases(config: RustPPOConfig) -> list[CurriculumPhase]:
+def smart_greedy_phases(config: Big2V2Config) -> list[CurriculumPhase]:
     return [
         CurriculumPhase(
             name="base",

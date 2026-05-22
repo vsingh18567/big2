@@ -35,9 +35,19 @@ class OpponentMixConfig:
         return names, [weight / total for weight in weights]
 
 
+def v2_opponent_mix() -> OpponentMixConfig:
+    return OpponentMixConfig(
+        learner_weight=0.55,
+        random_weight=0.0,
+        greedy_weight=0.20,
+        smart_weight=0.20,
+        checkpoint_weight=0.05,
+    )
+
+
 @dataclass
-class RustPPOConfig:
-    """Configuration for PPO over the Rust vectorized environment."""
+class Big2V2Config:
+    """Configuration for the Big2 v2 PPO trainer."""
 
     num_envs: int = 64
     seed: int = 42
@@ -49,8 +59,8 @@ class RustPPOConfig:
     action_emb_dim: int = 128
     action_feature_hidden: int = 128
     action_hidden: int = 256
-    candidate_set_context: bool = False
-    dynamic_action_features: bool = False
+    candidate_set_context: bool = True
+    dynamic_action_features: bool = True
 
     ppo_epochs: int = 2
     mini_batch_size: int = 512
@@ -59,26 +69,23 @@ class RustPPOConfig:
     lam: float = 0.95
     lr: float = 3e-4
     value_coef: float = 0.5
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.02
     entropy_schedule: EntropyScheduleMode = "constant"
     entropy_start_coef: float | None = None
     entropy_end_coef: float | None = None
     entropy_schedule_batches: int = 0
     max_grad_norm: float = 0.5
 
-    step_penalty: float = 0.0
-    progress_reward_coef: float = 0.0
-    pass_penalty: float = 0.0
-    terminal_reward_mode: TerminalRewardMode = "card_fraction"
+    terminal_reward_mode: TerminalRewardMode = "win_loss"
 
-    opponent_mix: OpponentMixConfig = field(default_factory=OpponentMixConfig)
-    controller_assignment: ControllerAssignmentMode = "turn"
+    opponent_mix: OpponentMixConfig = field(default_factory=v2_opponent_mix)
+    controller_assignment: ControllerAssignmentMode = "table_profile"
     curriculum: CurriculumMode = "off"
     device: str = "cpu"
 
-    checkpoint_dir: str = "rust_ppo_checkpoints"
+    checkpoint_dir: str = "big2_v2_checkpoints"
     init_checkpoint: str | None = None
-    metrics_path: str = "rust_ppo_metrics.jsonl"
+    metrics_path: str = "big2_v2_metrics.jsonl"
     checkpoint_interval: int = 10
     checkpoint_opponent_dir: str | None = None
     checkpoint_opponent_limit: int = 4

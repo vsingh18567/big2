@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from big2.training.rust_ppo.metadata import MoveMetadataTable
+from big2.training.big2_v2.metadata import MoveMetadataTable
 
 
 @dataclass(frozen=True)

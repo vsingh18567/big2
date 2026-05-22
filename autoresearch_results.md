@@ -1,10 +1,10 @@
 # Autoresearch Results
 
-Objective: improve Rust PPO Big 2 evaluation performance against `smart` and `greedy` opponents, using `runs/rust_ppo/train_metrics_256env_128cand.jsonl` as the baseline reference.
+Objective: improve Big2 v2 Big 2 evaluation performance against `smart` and `greedy` opponents, using `runs/big2_v2/train_metrics_256env_128cand.jsonl` as the baseline reference.
 
 ## Baseline Reference
 
-Source metrics: `runs/rust_ppo/train_metrics_256env_128cand.jsonl`
+Source metrics: `runs/big2_v2/train_metrics_256env_128cand.jsonl`
 
 Latest config row:
 
@@ -31,7 +31,7 @@ Observed through batch `174`, with evals through batch `150`:
 | 125 | 0.736 | 0.409 | 0.235 | 0.262 | 0.008 | 0.671 |
 | 150 | 0.735 | 0.406 | 0.241 | 0.271 | 0.040 | 0.677 |
 
-Best baseline checkpoint so far: `runs/rust_ppo/checkpoints_256env_128cand/batch_000150.pt`
+Best baseline checkpoint so far: `runs/big2_v2/checkpoints_256env_128cand/batch_000150.pt`
 
 Candidate truncation: `0` total observed; max candidate count `253`.
 
@@ -62,15 +62,15 @@ worktree after a targeted regression test passed.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 142 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/baseline_repro_75_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/baseline_repro_75_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 142 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/baseline_repro_75_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/baseline_repro_75_checkpoints
 ```
 
 - status: queued
 
 Relaunched as `baseline_repro_75_v2`:
 
-- metrics: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_baseline/runs/rust_ppo/autoresearch/baseline_repro_75_v2_metrics.jsonl`
-- checkpoint dir: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_baseline/runs/rust_ppo/autoresearch/baseline_repro_75_v2_checkpoints`
+- metrics: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_baseline/runs/big2_v2/autoresearch/baseline_repro_75_v2_metrics.jsonl`
+- checkpoint dir: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_baseline/runs/big2_v2/autoresearch/baseline_repro_75_v2_checkpoints`
 - status: completed batch `75`
 
 Eval rows:
@@ -95,7 +95,7 @@ terminal-credit first-wave runs.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 242 --learner-weight 0.55 --random-weight 0.05 --greedy-weight 0.25 --smart-weight 0.15 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/heuristic_mix_75_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/heuristic_mix_75_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 242 --learner-weight 0.55 --random-weight 0.05 --greedy-weight 0.25 --smart-weight 0.15 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/heuristic_mix_75_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/heuristic_mix_75_checkpoints
 ```
 
 - early-stop criteria: reject if clearly below baseline reproduction on both greedy and smart after batch 50, or if throughput degrades badly.
@@ -103,8 +103,8 @@ terminal-credit first-wave runs.
 
 Relaunched as `heuristic_mix_75_v2`:
 
-- metrics: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_mix/runs/rust_ppo/autoresearch/heuristic_mix_75_v2_metrics.jsonl`
-- checkpoint dir: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_mix/runs/rust_ppo/autoresearch/heuristic_mix_75_v2_checkpoints`
+- metrics: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_mix/runs/big2_v2/autoresearch/heuristic_mix_75_v2_metrics.jsonl`
+- checkpoint dir: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_mix/runs/big2_v2/autoresearch/heuristic_mix_75_v2_checkpoints`
 - status: killed after batch `60` because target eval was behind the reference
   trend on both smart and greedy after two checkpoints.
 
@@ -127,7 +127,7 @@ reduced learner sample share and did not improve target-opponent eval.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0001 --seed 342 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/low_lr_75_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/low_lr_75_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0001 --seed 342 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/low_lr_75_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/low_lr_75_checkpoints
 ```
 
 - early-stop criteria: reject if it is materially behind target-opponent baseline at batch 75 and only offers slower learning.
@@ -135,8 +135,8 @@ reduced learner sample share and did not improve target-opponent eval.
 
 Relaunched as `low_lr_75_v2`:
 
-- metrics: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_low_lr/runs/rust_ppo/autoresearch/low_lr_75_v2_metrics.jsonl`
-- checkpoint dir: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_low_lr/runs/rust_ppo/autoresearch/low_lr_75_v2_checkpoints`
+- metrics: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_low_lr/runs/big2_v2/autoresearch/low_lr_75_v2_metrics.jsonl`
+- checkpoint dir: `/Users/vikramsingh/Desktop/coding/big2_autoresearch_low_lr/runs/big2_v2/autoresearch/low_lr_75_v2_checkpoints`
 - status: completed batch `75`
 
 Eval rows:
@@ -164,14 +164,14 @@ dip is noise or slower learning saturation.
   the game.
 - branch/worktree: `autoresearch_terminal_boundary` /
   `/Users/vikramsingh/Desktop/coding/big2_autoresearch_terminal_boundary`
-- code/config changes: in `big2/training/rust_ppo/rollout.py`, keep the latest
+- code/config changes: in `big2/training/big2_v2/rollout.py`, keep the latest
   learner record by `(env_index, player)` during a rollout; when an env
   terminates, add that player's final Rust terminal reward to the latest record
   and set `done=True`, then clear records for the reset env.
 - test:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m pytest big2/training/rust_ppo/tests/test_rust_ppo.py::test_collect_rollout_credits_terminal_rewards_to_latest_learner_records big2/training/rust_ppo/tests/test_rust_ppo.py::test_collect_rollout_and_ppo_update_smoke -q
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m pytest big2/training/big2_v2/tests/test_big2_v2.py::test_collect_rollout_credits_terminal_rewards_to_latest_learner_records big2/training/big2_v2/tests/test_big2_v2.py::test_collect_rollout_and_ppo_update_smoke -q
 ```
 
 Result: `2 passed in 7.78s`.
@@ -180,7 +180,7 @@ Result: `2 passed in 7.78s`.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/terminal_credit_75_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/terminal_credit_75_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/terminal_credit_75_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/terminal_credit_75_checkpoints
 ```
 
 - first-wave result: completed batch `75`; best checkpoint is batch `75`.
@@ -212,7 +212,7 @@ with positive smart reward and no candidate truncation.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --resume --batches 150 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/terminal_credit_75_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/terminal_credit_75_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --resume --batches 150 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/terminal_credit_75_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/terminal_credit_75_checkpoints
 ```
 
 - result: completed through batch `150`; promoted again for continuation to
@@ -239,7 +239,7 @@ Conclusion: continue. Batch `150` is the best checkpoint so far.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --resume --batches 150 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0001 --seed 342 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/low_lr_75_v2_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/low_lr_75_v2_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --resume --batches 150 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0001 --seed 342 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/low_lr_75_v2_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/low_lr_75_v2_checkpoints
 ```
 
 - result: completed through batch `150`.
@@ -266,7 +266,7 @@ weaker and less stable than terminal-credit at `lr=3e-4`.
 - test:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m pytest big2/training/rust_ppo/tests/test_rust_ppo.py::test_collect_rollout_credits_terminal_rewards_to_latest_learner_records -q
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m pytest big2/training/big2_v2/tests/test_big2_v2.py::test_collect_rollout_credits_terminal_rewards_to_latest_learner_records -q
 ```
 
 Result: `1 passed in 3.03s`.
@@ -275,7 +275,7 @@ Result: `1 passed in 3.03s`.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0001 --seed 1042 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/terminal_low_lr_75_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/terminal_low_lr_75_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0001 --seed 1042 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/terminal_low_lr_75_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/terminal_low_lr_75_checkpoints
 ```
 
 - result: completed batch `75`.
@@ -302,7 +302,7 @@ terminal-credit run and the low-lr run at comparable checkpoints.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --resume --batches 225 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/terminal_credit_75_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/terminal_credit_75_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --resume --batches 225 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/terminal_credit_75_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/terminal_credit_75_checkpoints
 ```
 
 - result: completed through batch `225`; no truncation.
@@ -335,7 +335,7 @@ next long confirmation run.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --batches 100 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 1542 --learner-weight 0.60 --random-weight 0.05 --greedy-weight 0.05 --smart-weight 0.30 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/terminal_smart_focus_100_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/terminal_smart_focus_100_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --batches 100 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 1542 --learner-weight 0.60 --random-weight 0.05 --greedy-weight 0.05 --smart-weight 0.30 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/terminal_smart_focus_100_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/terminal_smart_focus_100_checkpoints
 ```
 
 - result: completed batch `100`; no truncation.
@@ -364,7 +364,7 @@ terminal-credit run.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 1442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/terminal_credit_seed1442_75_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/terminal_credit_seed1442_75_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 1442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/terminal_credit_seed1442_75_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/terminal_credit_seed1442_75_checkpoints
 ```
 
 - candidate-limited: killed at batch `24` because
@@ -382,7 +382,7 @@ terminal-credit run.
 - command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 512 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 1442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/terminal_credit_seed1442_75_512cand_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/terminal_credit_seed1442_75_512cand_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --batches 75 --num-envs 256 --rollout-steps 128 --max-candidates 512 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 1442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/terminal_credit_seed1442_75_512cand_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/terminal_credit_seed1442_75_512cand_checkpoints
 ```
 
 - result: completed batch `75`; no truncation.
@@ -432,10 +432,10 @@ settings:
 - eval/checkpoint every `25` batches, `256` eval games per seat, all 4 seats
 
 Strongest checkpoint:
-`/Users/vikramsingh/Desktop/coding/big2_autoresearch_terminal_boundary/runs/rust_ppo/autoresearch/terminal_credit_75_checkpoints/batch_000225.pt`
+`/Users/vikramsingh/Desktop/coding/big2_autoresearch_terminal_boundary/runs/big2_v2/autoresearch/terminal_credit_75_checkpoints/batch_000225.pt`
 
 Recommended confirmation command:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run --train --batches 225 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/rust_ppo/autoresearch/terminal_credit_confirm_metrics.jsonl --checkpoint-dir runs/rust_ppo/autoresearch/terminal_credit_confirm_checkpoints
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run --train --batches 225 --num-envs 256 --rollout-steps 128 --max-candidates 256 --ppo-epochs 2 --mini-batch-size 2048 --lr 0.0003 --seed 442 --learner-weight 0.75 --random-weight 0.10 --greedy-weight 0.10 --smart-weight 0.05 --eval-interval 25 --eval-games 256 --eval-num-envs 64 --checkpoint-interval 25 --logging-mode max --device cpu --metrics-path runs/big2_v2/autoresearch/terminal_credit_confirm_metrics.jsonl --checkpoint-dir runs/big2_v2/autoresearch/terminal_credit_confirm_checkpoints
 ```

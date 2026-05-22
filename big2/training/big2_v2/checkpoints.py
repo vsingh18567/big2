@@ -6,8 +6,8 @@ from typing import Any
 
 import torch
 
-from big2.training.rust_ppo.config import RustPPOConfig
-from big2.training.rust_ppo.model import RustCandidateActorCritic
+from big2.training.big2_v2.config import Big2V2Config
+from big2.training.big2_v2.model import Big2V2ActorCritic
 
 
 def checkpoint_path(checkpoint_dir: str | Path, batch: int) -> Path:
@@ -18,9 +18,9 @@ def save_checkpoint(
     *,
     checkpoint_dir: str | Path,
     batch: int,
-    policy: RustCandidateActorCritic,
+    policy: Big2V2ActorCritic,
     optimizer: torch.optim.Optimizer,
-    config: RustPPOConfig,
+    config: Big2V2Config,
     metrics: dict[str, Any] | None = None,
 ) -> Path:
     path = checkpoint_path(checkpoint_dir, batch)
@@ -46,7 +46,7 @@ def find_latest_checkpoint(checkpoint_dir: str | Path) -> Path | None:
 def load_checkpoint(
     *,
     path: str | Path,
-    policy: RustCandidateActorCritic,
+    policy: Big2V2ActorCritic,
     optimizer: torch.optim.Optimizer | None = None,
     map_location: str | torch.device = "cpu",
 ) -> dict[str, Any]:
@@ -60,7 +60,7 @@ def load_checkpoint(
 def load_checkpoint_partial(
     *,
     path: str | Path,
-    policy: RustCandidateActorCritic,
+    policy: Big2V2ActorCritic,
     map_location: str | torch.device = "cpu",
 ) -> dict[str, Any]:
     payload = torch.load(path, map_location=map_location)
@@ -71,7 +71,15 @@ def load_checkpoint_partial(
         if key in current_state and tuple(value.shape) == tuple(current_state[key].shape)
     }
     partial_loaded_keys: list[str] = []
-    _copy_action_projection_prefix(
+    _copy_linear_prefix(
+        key="action_projection.0.weight",
+        checkpoint_state=payload["model_state"],
+        current_state=current_state,
+        compatible_state=compatible_state,
+        partial_loaded_keys=partial_loaded_keys,
+    )
+    _copy_linear_prefix(
+        key="candidate_outcome_encoder.0.weight",
         checkpoint_state=payload["model_state"],
         current_state=current_state,
         compatible_state=compatible_state,
@@ -88,14 +96,14 @@ def load_checkpoint_partial(
     return payload
 
 
-def _copy_action_projection_prefix(
+def _copy_linear_prefix(
     *,
+    key: str,
     checkpoint_state: dict[str, torch.Tensor],
     current_state: dict[str, torch.Tensor],
     compatible_state: dict[str, torch.Tensor],
     partial_loaded_keys: list[str],
 ) -> None:
-    key = "action_projection.0.weight"
     if key not in checkpoint_state or key not in current_state or key in compatible_state:
         return
 

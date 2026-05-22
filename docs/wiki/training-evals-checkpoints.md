@@ -1,7 +1,7 @@
 # Training, Evals, and Checkpoints
 
-This page covers the Rust-backed PPO CLI in
-`big2/training/rust_ppo/run.py`. It assumes `big2_rust` has been installed with
+This page covers the Big2 v2 PPO CLI in
+`big2/training/big2_v2/run.py`. It assumes `big2_rust` has been installed with
 `maturin develop`; see [Test Runbook](test-runbook.md).
 
 ## Starter Commands
@@ -9,7 +9,7 @@ This page covers the Rust-backed PPO CLI in
 Fast CPU smoke train with metrics and evals every batch:
 
 ```sh
-uv run python -m big2.training.rust_ppo.run --train \
+uv run python -m big2.training.big2_v2.run --train \
   --batches 2 \
   --num-envs 4 \
   --rollout-steps 8 \
@@ -20,14 +20,14 @@ uv run python -m big2.training.rust_ppo.run --train \
   --eval-games 8 \
   --eval-num-envs 4 \
   --checkpoint-interval 1 \
-  --metrics-path runs/rust_ppo/smoke_metrics.jsonl \
-  --checkpoint-dir runs/rust_ppo/checkpoints
+  --metrics-path runs/big2_v2/smoke_metrics.jsonl \
+  --checkpoint-dir runs/big2_v2/checkpoints
 ```
 
 Small local baseline:
 
 ```sh
-uv run python -m big2.training.rust_ppo.run --train \
+uv run python -m big2.training.big2_v2.run --train \
   --batches 20 \
   --num-envs 16 \
   --rollout-steps 32 \
@@ -38,14 +38,14 @@ uv run python -m big2.training.rust_ppo.run --train \
   --eval-games 32 \
   --eval-num-envs 8 \
   --checkpoint-interval 5 \
-  --metrics-path runs/rust_ppo/local_metrics.jsonl \
-  --checkpoint-dir runs/rust_ppo/checkpoints
+  --metrics-path runs/big2_v2/local_metrics.jsonl \
+  --checkpoint-dir runs/big2_v2/checkpoints
 ```
 
 Larger CPU/GPU starter:
 
 ```sh
-uv run python -m big2.training.rust_ppo.run --train \
+uv run python -m big2.training.big2_v2.run --train \
   --batches 100 \
   --num-envs 64 \
   --rollout-steps 128 \
@@ -57,8 +57,8 @@ uv run python -m big2.training.rust_ppo.run --train \
   --eval-num-envs 16 \
   --checkpoint-interval 10 \
   --device cpu \
-  --metrics-path runs/rust_ppo/train_metrics.jsonl \
-  --checkpoint-dir runs/rust_ppo/checkpoints
+  --metrics-path runs/big2_v2/train_metrics.jsonl \
+  --checkpoint-dir runs/big2_v2/checkpoints
 ```
 
 Change `--device cpu` to a Torch-supported accelerator only after a smoke run
@@ -67,28 +67,32 @@ passes on that machine.
 ## Opponent Mix
 
 The rollout controller samples each active environment turn from normalized
-weights. Defaults are learner self-play only:
+weights. Big2 v2 defaults to the best current recipe:
 
 ```text
-learner=1.0 random=0.0 greedy=0.0 smart=0.0
+learner=0.55 random=0.0 greedy=0.20 smart=0.20 checkpoint=0.05
 ```
 
-Suggested starters:
+The default controller assignment is `table-profile`: each table is either
+all-learner self-play or one learner seat against one opponent profile for the
+other three seats. If no checkpoint-opponent files are available, checkpoint
+weight is ignored and the remaining weights are renormalized.
+
+Useful overrides:
 
 ```sh
-# Learn basic legality and reward signal through self-play.
---learner-weight 1.0 --random-weight 0.0 --greedy-weight 0.0 --smart-weight 0.0
+# Cold start with the current default v2 recipe.
+--learner-weight 0.55 --random-weight 0.0 --greedy-weight 0.20 --smart-weight 0.20 --checkpoint-opponent-weight 0.05
 
-# Add weak diversity.
---learner-weight 0.8 --random-weight 0.2 --greedy-weight 0.0 --smart-weight 0.0
+# Pure self-play smoke/debug mode.
+--learner-weight 1.0 --random-weight 0.0 --greedy-weight 0.0 --smart-weight 0.0 --checkpoint-opponent-weight 0.0 --controller-assignment turn
 
-# Add fixed heuristic pressure once smoke metrics are stable.
---learner-weight 0.6 --random-weight 0.1 --greedy-weight 0.2 --smart-weight 0.1
+# Use retained v2 checkpoint opponents.
+--checkpoint-opponent-dir runs/big2_v2/terminal_credit_league_500_seed442_v2_checkpoints
 ```
 
-Weights must sum to a positive value. The CLI currently exposes learner,
-random, greedy, and smart weights; checkpoint opponents are present in the
-config/rollout layer but are not wired as a CLI option in `run.py`.
+Weights must sum to a positive value. The CLI exposes learner, random, greedy,
+smart, and checkpoint-opponent weights.
 
 ## Outputs
 
@@ -118,10 +122,10 @@ config, and the metrics row passed to `save_checkpoint`.
 Resume from the latest checkpoint in `--checkpoint-dir`:
 
 ```sh
-uv run python -m big2.training.rust_ppo.run --train --resume \
+uv run python -m big2.training.big2_v2.run --train --resume \
   --batches 40 \
-  --checkpoint-dir runs/rust_ppo/checkpoints \
-  --metrics-path runs/rust_ppo/train_metrics.jsonl
+  --checkpoint-dir runs/big2_v2/checkpoints \
+  --metrics-path runs/big2_v2/train_metrics.jsonl
 ```
 
 `--batches` is the final batch index for that run. If the latest checkpoint is
@@ -177,6 +181,6 @@ Troubleshooting steps:
 - Reinstall `big2_rust` after Rust changes so Python and Rust agree on the batch
   contract.
 - Run `cargo test --manifest-path big2-rust/Cargo.toml` and
-  `uv run pytest big2/training/rust_ppo/tests/test_rust_ppo.py -v`.
+  `uv run pytest big2/training/big2_v2/tests/test_big2_v2.py -v`.
 - Reduce `--num-envs` before reducing `--max-candidates`; smaller candidate
   buffers change action availability, while fewer envs only reduce throughput.

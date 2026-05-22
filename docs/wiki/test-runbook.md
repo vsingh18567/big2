@@ -1,6 +1,6 @@
 # Test Runbook
 
-Operational commands for validating the Rust-backed Big 2 stack from a clean
+Operational commands for validating the Big2 v2 Big 2 stack from a clean
 checkout. Run commands from the repository root unless noted.
 
 ## Environment Setup
@@ -45,10 +45,10 @@ candidate-list truncation accounting.
 
 ## Python Validation
 
-Run the Rust PPO integration tests after installing `big2_rust`:
+Run the Big2 v2 integration tests after installing `big2_rust`:
 
 ```sh
-uv run pytest big2/training/rust_ppo/tests/test_rust_ppo.py -v
+uv run pytest big2/training/big2_v2/tests/test_big2_v2.py -v
 ```
 
 Useful targeted suites:
@@ -74,7 +74,7 @@ before invoking pytest.
 Run a minimal PPO smoke pass without writing checkpoints:
 
 ```sh
-uv run python -m big2.training.rust_ppo.run \
+uv run python -m big2.training.big2_v2.run \
   --num-envs 2 \
   --rollout-steps 4 \
   --max-candidates 128 \
@@ -85,7 +85,7 @@ uv run python -m big2.training.rust_ppo.run \
 Expected output is one line like:
 
 ```text
-rust_ppo smoke: samples=8 loss=... entropy=...
+big2_v2 smoke: samples=8 loss=... entropy=...
 ```
 
 ## Common Failures
@@ -95,6 +95,6 @@ rust_ppo smoke: samples=8 loss=... entropy=...
 - Candidate tensor shape errors: confirm the Python command and Rust module were
   built from the same checkout.
 - Empty or invalid candidate rows: run `cargo test --manifest-path
-  big2-rust/Cargo.toml` first, then rerun the Rust PPO tests.
+  big2-rust/Cargo.toml` first, then rerun the Big2 v2 tests.
 - Truncation-related instability: raise `--max-candidates`; truncation means at
   least one legal candidate list did not fit the rectangular batch buffer.

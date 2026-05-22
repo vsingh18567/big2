@@ -22,7 +22,7 @@ OBS_LAST_MOVE_PRIMARY_RANK = 114
 OBS_LAST_MOVE_HIGH_SUIT_START = 116
 OBS_LAST_MOVE_HIGH_SUIT_END = 120
 OBS_FREE_LEAD = 128
-DYNAMIC_ACTION_FEATURE_DIM = 92
+DYNAMIC_ACTION_FEATURE_DIM = 110
 
 
 @dataclass(frozen=True)
@@ -34,8 +34,8 @@ class ActionSelection:
     values: torch.Tensor
 
 
-class RustCandidateActorCritic(nn.Module):
-    """Candidate-scoring actor-critic for Rust observations and global move IDs."""
+class Big2V2ActorCritic(nn.Module):
+    """Candidate-scoring actor-critic for Big2 v2 observations and global move IDs."""
 
     def __init__(
         self,
@@ -131,7 +131,11 @@ class RustCandidateActorCritic(nn.Module):
         feature_emb = self.move_feature_encoder(selected_move_features)
         action_inputs = [id_emb, feature_emb]
         if self.dynamic_action_features:
-            candidate_outcome_features = self._candidate_outcome_features(obs.float(), selected_move_features)
+            candidate_outcome_features = self._candidate_outcome_features(
+                obs.float(),
+                selected_move_features,
+                candidate_mask,
+            )
             action_inputs.append(self.candidate_outcome_encoder(candidate_outcome_features.float()))
         action_h = self.action_projection(torch.cat(action_inputs, dim=-1))
 
@@ -150,6 +154,7 @@ class RustCandidateActorCritic(nn.Module):
         self,
         obs: torch.Tensor,
         selected_move_features: torch.Tensor,
+        candidate_mask: torch.Tensor,
     ) -> torch.Tensor:
         own_hand = obs[:, OWN_HAND_START:OWN_HAND_END].unsqueeze(1)
         move_mask = selected_move_features[..., MOVE_CARD_MASK_START:MOVE_CARD_MASK_END].clamp(0.0, 1.0)
@@ -163,6 +168,7 @@ class RustCandidateActorCritic(nn.Module):
 
         move_kind = selected_move_features[..., MOVE_KIND_START:MOVE_KIND_END]
         is_pass = move_kind[..., 0:1]
+        is_non_pass = 1.0 - is_pass
         rank_present = rank_counts > 0.0
         rank_values = self.rank_values.view(1, 1, 13)
         high_rank = torch.where(rank_present, rank_values, torch.full_like(rank_counts, -1.0)).max(dim=-1).values
@@ -170,7 +176,8 @@ class RustCandidateActorCritic(nn.Module):
 
         free_lead = obs[:, OBS_FREE_LEAD : OBS_FREE_LEAD + 1].unsqueeze(1)
         free_lead_feature = free_lead.expand(-1, selected_move_features.shape[1], -1)
-        is_response = (1.0 - free_lead) * (1.0 - is_pass)
+        response_turn = 1.0 - free_lead
+        is_response = response_turn * is_non_pass
         last_kind = obs[:, OBS_LAST_MOVE_KIND_START:OBS_LAST_MOVE_KIND_END].unsqueeze(1)
         same_kind = (move_kind * last_kind).sum(dim=-1, keepdim=True) * is_response
         move_kind_idx = (move_kind * self.kind_values.view(1, 1, 9)).sum(dim=-1, keepdim=True)
@@ -192,6 +199,17 @@ class RustCandidateActorCritic(nn.Module):
             * self.suit_values.view(1, 1, 4)
         ).sum(dim=-1, keepdim=True) / 3.0
         high_suit_delta = (move_high_suit - last_high_suit) * same_kind
+        candidate_relative_features = self._candidate_relative_features(
+            candidate_mask=candidate_mask,
+            is_pass=is_pass,
+            is_non_pass=is_non_pass,
+            response_turn=response_turn,
+            move_kind=move_kind,
+            last_kind=last_kind,
+            move_kind_idx=move_kind_idx,
+            move_primary_rank=move_primary_rank,
+            move_high_suit=move_high_suit,
+        )
 
         scalar_features = torch.cat(
             [
@@ -218,10 +236,84 @@ class RustCandidateActorCritic(nn.Module):
                 kind_delta,
                 primary_rank_delta,
                 high_suit_delta,
+                candidate_relative_features,
             ],
             dim=-1,
         )
         return torch.cat([remaining, rank_counts / 4.0, suit_counts / 13.0, scalar_features], dim=-1)
+
+    def _candidate_relative_features(
+        self,
+        *,
+        candidate_mask: torch.Tensor,
+        is_pass: torch.Tensor,
+        is_non_pass: torch.Tensor,
+        response_turn: torch.Tensor,
+        move_kind: torch.Tensor,
+        last_kind: torch.Tensor,
+        move_kind_idx: torch.Tensor,
+        move_primary_rank: torch.Tensor,
+        move_high_suit: torch.Tensor,
+    ) -> torch.Tensor:
+        valid = candidate_mask.unsqueeze(-1).float()
+        valid_non_pass = valid * is_non_pass
+        non_pass_count = valid_non_pass.sum(dim=1, keepdim=True).clamp_min(0.0)
+        candidate_count = valid.sum(dim=1, keepdim=True).clamp_min(1.0)
+        has_non_pass = (non_pass_count > 0.0).float()
+
+        optional_pass = is_pass * response_turn * has_non_pass
+        forced_pass = is_pass * (1.0 - has_non_pass)
+        sole_non_pass = is_non_pass * (non_pass_count == 1.0).float()
+
+        selected_strength = (move_kind_idx / 8.0) + move_primary_rank + (move_high_suit * 0.125)
+        strength_masked_min = selected_strength.masked_fill(valid_non_pass <= 0.0, torch.finfo(selected_strength.dtype).max)
+        strength_masked_max = selected_strength.masked_fill(valid_non_pass <= 0.0, torch.finfo(selected_strength.dtype).min)
+        min_strength = strength_masked_min.min(dim=1, keepdim=True).values
+        max_strength = strength_masked_max.max(dim=1, keepdim=True).values
+        strength_sum = (selected_strength * valid_non_pass).sum(dim=1, keepdim=True)
+        mean_strength = strength_sum / non_pass_count.clamp_min(1.0)
+        min_strength = torch.where(has_non_pass > 0.0, min_strength, torch.zeros_like(min_strength))
+        max_strength = torch.where(has_non_pass > 0.0, max_strength, torch.zeros_like(max_strength))
+        mean_strength = torch.where(has_non_pass > 0.0, mean_strength, torch.zeros_like(mean_strength))
+        is_weakest_non_pass = is_non_pass * (selected_strength <= min_strength + 1.0e-6).float()
+        is_strongest_non_pass = is_non_pass * (selected_strength >= max_strength - 1.0e-6).float()
+
+        same_kind_mask = (move_kind * last_kind).sum(dim=-1, keepdim=True) * valid_non_pass * response_turn
+        same_kind_count = same_kind_mask.sum(dim=1, keepdim=True)
+        has_same_kind = (same_kind_count > 0.0).float()
+        same_kind_min = selected_strength.masked_fill(same_kind_mask <= 0.0, torch.finfo(selected_strength.dtype).max)
+        min_same_kind_strength = same_kind_min.min(dim=1, keepdim=True).values
+        min_same_kind_strength = torch.where(
+            has_same_kind > 0.0,
+            min_same_kind_strength,
+            torch.zeros_like(min_same_kind_strength),
+        )
+        selected_same_kind_delta = (selected_strength - min_same_kind_strength) * same_kind_mask
+        is_weakest_same_kind = same_kind_mask * (selected_strength <= min_same_kind_strength + 1.0e-6).float()
+
+        return torch.cat(
+            [
+                candidate_count.expand_as(is_pass).clamp_max(32.0) / 32.0,
+                non_pass_count.expand_as(is_pass).clamp_max(32.0) / 32.0,
+                has_non_pass.expand_as(is_pass),
+                optional_pass,
+                forced_pass,
+                sole_non_pass,
+                min_strength.expand_as(is_pass) / 3.0,
+                mean_strength.expand_as(is_pass) / 3.0,
+                max_strength.expand_as(is_pass) / 3.0,
+                selected_strength / 3.0,
+                ((selected_strength - min_strength) * is_non_pass) / 3.0,
+                ((max_strength - selected_strength) * is_non_pass) / 3.0,
+                is_weakest_non_pass,
+                is_strongest_non_pass,
+                same_kind_count.expand_as(is_pass).clamp_max(16.0) / 16.0,
+                has_same_kind.expand_as(is_pass),
+                selected_same_kind_delta / 3.0,
+                is_weakest_same_kind,
+            ],
+            dim=-1,
+        )
 
     @staticmethod
     def _candidate_set_summary(action_h: torch.Tensor, candidate_mask: torch.Tensor) -> torch.Tensor:

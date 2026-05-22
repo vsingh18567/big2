@@ -5,15 +5,15 @@ import random
 
 import torch
 
-from big2.training.rust_ppo.checkpoints import load_checkpoint, load_checkpoint_partial, save_checkpoint
-from big2.training.rust_ppo.config import OpponentMixConfig, RustPPOConfig
-from big2.training.rust_ppo.curriculum import entropy_coef_for_batch, training_controls_for_batch
-from big2.training.rust_ppo.env_adapter import RustVecEnvAdapter
-from big2.training.rust_ppo.evaluate import evaluate_policy
-from big2.training.rust_ppo.model import RustCandidateActorCritic
-from big2.training.rust_ppo.opponents import greedy_slot, smart_slot
-from big2.training.rust_ppo.rollout import RustRolloutState, collect_rollout
-from big2.training.rust_ppo.run import (
+from big2.training.big2_v2.checkpoints import load_checkpoint, load_checkpoint_partial, save_checkpoint
+from big2.training.big2_v2.config import OpponentMixConfig, Big2V2Config
+from big2.training.big2_v2.curriculum import entropy_coef_for_batch, training_controls_for_batch
+from big2.training.big2_v2.env_adapter import RustVecEnvAdapter
+from big2.training.big2_v2.evaluate import evaluate_policy
+from big2.training.big2_v2.model import DYNAMIC_ACTION_FEATURE_DIM, OBS_FREE_LEAD, Big2V2ActorCritic
+from big2.training.big2_v2.opponents import greedy_slot, smart_slot
+from big2.training.big2_v2.rollout import Big2V2RolloutState, collect_rollout
+from big2.training.big2_v2.run import (
     _build_training_row,
     _checkpoint_opponent_paths,
     _load_checkpoint_opponent_pool,
@@ -21,15 +21,15 @@ from big2.training.rust_ppo.run import (
     build_policy,
     run_training,
 )
-from big2.training.rust_ppo.update import compute_gae, ppo_update
+from big2.training.big2_v2.update import compute_gae, ppo_update
 
 
 def make_env(num_envs: int = 2, max_candidates: int = 128) -> RustVecEnvAdapter:
     return RustVecEnvAdapter(num_envs=num_envs, seed=123, max_candidates=max_candidates, device="cpu")
 
 
-def make_policy(env: RustVecEnvAdapter, obs_dim: int) -> RustCandidateActorCritic:
-    return RustCandidateActorCritic(
+def make_policy(env: RustVecEnvAdapter, obs_dim: int) -> Big2V2ActorCritic:
+    return Big2V2ActorCritic(
         obs_dim=obs_dim,
         num_actions=env.num_actions,
         move_features=env.metadata.as_tensor("cpu"),
@@ -41,7 +41,7 @@ def make_policy(env: RustVecEnvAdapter, obs_dim: int) -> RustCandidateActorCriti
 
 
 def test_linear_entropy_schedule_interpolates_by_batch() -> None:
-    config = RustPPOConfig(
+    config = Big2V2Config(
         batches=101,
         entropy_coef=0.01,
         entropy_schedule="linear",
@@ -57,7 +57,7 @@ def test_linear_entropy_schedule_interpolates_by_batch() -> None:
 
 
 def test_smart_greedy_curriculum_selects_phase_from_latest_eval_score() -> None:
-    config = RustPPOConfig(
+    config = Big2V2Config(
         entropy_coef=0.01,
         curriculum="smart_greedy",
         opponent_mix=OpponentMixConfig(
@@ -146,7 +146,7 @@ def test_checkpoint_opponent_paths_apply_stride_and_limit(tmp_path) -> None:
         (tmp_path / f"batch_{batch:06d}.pt").write_text("")
 
     paths = _checkpoint_opponent_paths(
-        RustPPOConfig(
+        Big2V2Config(
             checkpoint_opponent_dir=str(tmp_path),
             checkpoint_opponent_stride=25,
             checkpoint_opponent_limit=2,
@@ -157,7 +157,7 @@ def test_checkpoint_opponent_paths_apply_stride_and_limit(tmp_path) -> None:
 
 
 def test_checkpoint_opponent_pool_loads_frozen_policies(tmp_path) -> None:
-    config = RustPPOConfig(
+    config = Big2V2Config(
         checkpoint_opponent_dir=str(tmp_path),
         checkpoint_opponent_limit=2,
         checkpoint_opponent_stride=1,
@@ -187,11 +187,13 @@ def test_checkpoint_opponent_pool_loads_frozen_policies(tmp_path) -> None:
 
 
 def test_partial_checkpoint_load_warm_starts_candidate_context_model(tmp_path) -> None:
-    config = RustPPOConfig(
+    config = Big2V2Config(
         obs_hidden=64,
         action_emb_dim=16,
         action_feature_hidden=16,
         action_hidden=32,
+        candidate_set_context=False,
+        dynamic_action_features=False,
     )
     env = make_env(num_envs=2, max_candidates=128)
     batch = env.reset()
@@ -206,7 +208,7 @@ def test_partial_checkpoint_load_warm_starts_candidate_context_model(tmp_path) -
     )
     context_policy = build_policy(
         env,
-        RustPPOConfig(
+        Big2V2Config(
             obs_hidden=64,
             action_emb_dim=16,
             action_feature_hidden=16,
@@ -223,12 +225,13 @@ def test_partial_checkpoint_load_warm_starts_candidate_context_model(tmp_path) -
 
 
 def test_partial_checkpoint_load_warm_starts_dynamic_action_model(tmp_path) -> None:
-    base_config = RustPPOConfig(
+    base_config = Big2V2Config(
         obs_hidden=64,
         action_emb_dim=16,
         action_feature_hidden=16,
         action_hidden=32,
         candidate_set_context=True,
+        dynamic_action_features=False,
     )
     env = make_env(num_envs=2, max_candidates=128)
     batch = env.reset()
@@ -243,7 +246,7 @@ def test_partial_checkpoint_load_warm_starts_dynamic_action_model(tmp_path) -> N
     )
     dynamic_policy = build_policy(
         env,
-        RustPPOConfig(
+        Big2V2Config(
             obs_hidden=64,
             action_emb_dim=16,
             action_feature_hidden=16,
@@ -266,6 +269,41 @@ def test_partial_checkpoint_load_warm_starts_dynamic_action_model(tmp_path) -> N
     assert "action_projection.0.weight" not in payload["partial_load"]["skipped_checkpoint_keys"]
     assert torch.allclose(target_projection[:, : source_projection.shape[1]], source_projection)
     assert torch.count_nonzero(target_projection[:, source_projection.shape[1] :]) == 0
+
+
+def test_partial_checkpoint_load_warm_starts_extended_dynamic_features(tmp_path) -> None:
+    config = Big2V2Config(
+        obs_hidden=64,
+        action_emb_dim=16,
+        action_feature_hidden=16,
+        action_hidden=32,
+        candidate_set_context=True,
+        dynamic_action_features=True,
+    )
+    env = make_env(num_envs=2, max_candidates=128)
+    batch = env.reset()
+    source_policy = build_policy(env, config, obs_dim=batch.obs_dim)
+    optimizer = torch.optim.Adam(source_policy.parameters(), lr=1e-3)
+    checkpoint = save_checkpoint(
+        checkpoint_dir=tmp_path,
+        batch=1,
+        policy=source_policy,
+        optimizer=optimizer,
+        config=config,
+    )
+    checkpoint_payload = torch.load(checkpoint, map_location="cpu")
+    old_width = DYNAMIC_ACTION_FEATURE_DIM - 18
+    source_outcome_weight = checkpoint_payload["model_state"]["candidate_outcome_encoder.0.weight"][:, :old_width].clone()
+    checkpoint_payload["model_state"]["candidate_outcome_encoder.0.weight"] = source_outcome_weight
+    torch.save(checkpoint_payload, checkpoint)
+
+    target_policy = build_policy(env, config, obs_dim=batch.obs_dim)
+    payload = load_checkpoint_partial(path=checkpoint, policy=target_policy)
+    target_outcome_weight = target_policy.state_dict()["candidate_outcome_encoder.0.weight"]
+
+    assert "candidate_outcome_encoder.0.weight" in payload["partial_load"]["partial_loaded_keys"]
+    assert torch.allclose(target_outcome_weight[:, :old_width], source_outcome_weight)
+    assert torch.count_nonzero(target_outcome_weight[:, old_width:]) == 0
 
 
 def test_env_adapter_shapes_and_metadata() -> None:
@@ -298,7 +336,7 @@ def test_model_masks_invalid_candidate_slots() -> None:
 def test_candidate_set_context_ignores_masked_candidate_ids() -> None:
     env = make_env(num_envs=2, max_candidates=64)
     batch = env.reset()
-    policy = RustCandidateActorCritic(
+    policy = Big2V2ActorCritic(
         obs_dim=batch.obs_dim,
         num_actions=env.num_actions,
         move_features=env.metadata.as_tensor("cpu"),
@@ -334,7 +372,7 @@ def test_policy_action_selection_returns_legal_move_ids() -> None:
 def test_dynamic_action_features_feed_action_scoring() -> None:
     env = make_env(num_envs=2, max_candidates=64)
     batch = env.reset()
-    policy = RustCandidateActorCritic(
+    policy = Big2V2ActorCritic(
         obs_dim=batch.obs_dim,
         num_actions=env.num_actions,
         move_features=env.metadata.as_tensor("cpu"),
@@ -356,6 +394,44 @@ def test_dynamic_action_features_feed_action_scoring() -> None:
         altered_obs[:, :52] = 0.0
         altered_logits, _ = policy(altered_obs, batch.candidate_ids, batch.candidate_mask)
     assert not torch.allclose(logits[batch.candidate_mask], altered_logits[batch.candidate_mask])
+
+
+def test_dynamic_action_features_mark_optional_and_forced_passes() -> None:
+    env = make_env(num_envs=1, max_candidates=128)
+    batch = env.reset()
+    policy = Big2V2ActorCritic(
+        obs_dim=batch.obs_dim,
+        num_actions=env.num_actions,
+        move_features=env.metadata.as_tensor("cpu"),
+        obs_hidden=64,
+        action_emb_dim=16,
+        action_feature_hidden=16,
+        action_hidden=32,
+        dynamic_action_features=True,
+    )
+    non_pass_id = next(row.move_id for row in env.metadata.rows if not row.is_pass)
+    obs = torch.zeros((1, batch.obs_dim))
+    obs[:, OBS_FREE_LEAD] = 0.0
+    selected_move_features = policy.move_features[torch.tensor([[0, non_pass_id]])]
+
+    optional_features = policy._candidate_outcome_features(
+        obs,
+        selected_move_features,
+        torch.tensor([[True, True]]),
+    )
+    forced_features = policy._candidate_outcome_features(
+        obs,
+        selected_move_features,
+        torch.tensor([[True, False]]),
+    )
+
+    optional_pass_idx = DYNAMIC_ACTION_FEATURE_DIM - 15
+    forced_pass_idx = DYNAMIC_ACTION_FEATURE_DIM - 14
+    assert optional_features.shape[-1] == DYNAMIC_ACTION_FEATURE_DIM
+    assert optional_features[0, 0, optional_pass_idx] == 1.0
+    assert optional_features[0, 0, forced_pass_idx] == 0.0
+    assert forced_features[0, 0, optional_pass_idx] == 0.0
+    assert forced_features[0, 0, forced_pass_idx] == 1.0
 
 
 def test_metadata_heuristics_choose_valid_slots() -> None:
@@ -421,7 +497,7 @@ def test_collect_rollout_and_ppo_update_smoke() -> None:
         batch_idx=1,
         stats=stats,
         buffer=buffer,
-        config=RustPPOConfig(logging_mode="max"),
+        config=Big2V2Config(logging_mode="max"),
         rollout_seconds=0.1,
         update_seconds=0.2,
     )
@@ -466,7 +542,7 @@ def test_collect_rollout_single_learner_assignment_is_episode_seat_stable() -> N
     env = make_env(num_envs=8, max_candidates=128)
     batch = env.reset()
     policy = make_policy(env, batch.obs_dim)
-    state = RustRolloutState.create(batch.num_envs)
+    state = Big2V2RolloutState.create(batch.num_envs)
 
     buffer, _ = collect_rollout(
         env=env,
@@ -490,7 +566,7 @@ def test_collect_rollout_single_learner_uniform_uses_episode_opponent_profiles()
     env = make_env(num_envs=12, max_candidates=128)
     batch = env.reset()
     policy = make_policy(env, batch.obs_dim)
-    state = RustRolloutState.create(batch.num_envs)
+    state = Big2V2RolloutState.create(batch.num_envs)
 
     collect_rollout(
         env=env,
@@ -514,7 +590,7 @@ def test_collect_rollout_table_profile_uses_learner_weight_for_self_play_tables(
     env = make_env(num_envs=16, max_candidates=128)
     batch = env.reset()
     policy = make_policy(env, batch.obs_dim)
-    state = RustRolloutState.create(batch.num_envs)
+    state = Big2V2RolloutState.create(batch.num_envs)
 
     collect_rollout(
         env=env,
@@ -534,7 +610,7 @@ def test_collect_rollout_table_profile_uses_uniform_target_opponent_tables() -> 
     env = make_env(num_envs=16, max_candidates=128)
     batch = env.reset()
     policy = make_policy(env, batch.obs_dim)
-    state = RustRolloutState.create(batch.num_envs)
+    state = Big2V2RolloutState.create(batch.num_envs)
 
     collect_rollout(
         env=env,
@@ -556,7 +632,7 @@ def test_collect_rollout_records_bootstrap_values_for_unfinished_learner_tails()
     env = make_env(num_envs=8, max_candidates=128)
     batch = env.reset()
     policy = make_policy(env, batch.obs_dim)
-    state = RustRolloutState.create(batch.num_envs)
+    state = Big2V2RolloutState.create(batch.num_envs)
 
     buffer, next_batch = collect_rollout(
         env=env,
@@ -665,7 +741,7 @@ def test_evaluate_policy_tracks_fixed_opponent_results() -> None:
 
 
 def test_minimal_logging_only_prints_eval_rows(tmp_path, capsys) -> None:
-    config = RustPPOConfig(
+    config = Big2V2Config(
         num_envs=1,
         batches=1,
         rollout_steps=1,
@@ -701,7 +777,7 @@ def test_checkpoint_round_trip(tmp_path) -> None:
         batch=3,
         policy=policy,
         optimizer=optimizer,
-        config=RustPPOConfig(),
+        config=Big2V2Config(),
         metrics={"win_rate": 0.5},
     )
     payload = load_checkpoint(path=path, policy=policy, optimizer=optimizer)

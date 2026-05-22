@@ -6,14 +6,14 @@ from dataclasses import dataclass, field
 
 import torch
 
-from big2.training.rust_ppo.config import ControllerAssignmentMode, OpponentMixConfig, TerminalRewardMode
-from big2.training.rust_ppo.env_adapter import RustBatch, RustVecEnvAdapter
-from big2.training.rust_ppo.model import RustCandidateActorCritic
-from big2.training.rust_ppo.opponents import greedy_slot, random_slot, smart_slot
+from big2.training.big2_v2.config import ControllerAssignmentMode, OpponentMixConfig, TerminalRewardMode
+from big2.training.big2_v2.env_adapter import RustBatch, RustVecEnvAdapter
+from big2.training.big2_v2.model import Big2V2ActorCritic
+from big2.training.big2_v2.opponents import greedy_slot, random_slot, smart_slot
 
 
 @dataclass
-class RustRolloutRecord:
+class Big2V2RolloutRecord:
     env_index: int
     player: int
     obs: torch.Tensor
@@ -28,8 +28,8 @@ class RustRolloutRecord:
 
 
 @dataclass
-class RustRolloutBuffer:
-    records: list[RustRolloutRecord] = field(default_factory=list)
+class Big2V2RolloutBuffer:
+    records: list[Big2V2RolloutRecord] = field(default_factory=list)
     candidate_count_total: int = 0
     candidate_count_rows: int = 0
     candidate_count_max: int = 0
@@ -48,7 +48,7 @@ class RustRolloutBuffer:
     def __len__(self) -> int:
         return len(self.records)
 
-    def append(self, record: RustRolloutRecord) -> None:
+    def append(self, record: Big2V2RolloutRecord) -> None:
         self.records.append(record)
 
     @property
@@ -68,8 +68,8 @@ class RustRolloutBuffer:
             self.candidate_counts.extend(int(count.item()) for count in active_counts.detach().cpu())
         self.truncated_candidate_lists += batch.truncated_candidate_lists
 
-    def by_trajectory(self) -> dict[tuple[int, int], list[RustRolloutRecord]]:
-        grouped: dict[tuple[int, int], list[RustRolloutRecord]] = defaultdict(list)
+    def by_trajectory(self) -> dict[tuple[int, int], list[Big2V2RolloutRecord]]:
+        grouped: dict[tuple[int, int], list[Big2V2RolloutRecord]] = defaultdict(list)
         for record in self.records:
             grouped[(record.env_index, record.player)].append(record)
         return grouped
@@ -97,14 +97,14 @@ class RustRolloutBuffer:
 
 
 @dataclass
-class RustRolloutState:
+class Big2V2RolloutState:
     """State that must survive across fixed-length rollout batches."""
 
     episode_step_counts: list[int]
     seat_controllers: list[list[str | None]]
 
     @classmethod
-    def create(cls, num_envs: int) -> RustRolloutState:
+    def create(cls, num_envs: int) -> Big2V2RolloutState:
         return cls(
             episode_step_counts=[0 for _ in range(num_envs)],
             seat_controllers=[[None for _ in range(4)] for _ in range(num_envs)],
@@ -150,7 +150,7 @@ def _sample_controller(
 
 def _assign_episode_controllers(
     *,
-    state: RustRolloutState,
+    state: Big2V2RolloutState,
     env_idx: int,
     opponent_mix: OpponentMixConfig,
     controller_assignment: ControllerAssignmentMode,
@@ -230,7 +230,7 @@ def _assign_episode_controllers(
 
 def _controller_for_turn(
     *,
-    state: RustRolloutState,
+    state: Big2V2RolloutState,
     env_idx: int,
     player: int,
     opponent_mix: OpponentMixConfig,
@@ -263,27 +263,26 @@ def _controller_for_turn(
 def collect_rollout(
     *,
     env: RustVecEnvAdapter,
-    policy: RustCandidateActorCritic,
+    policy: Big2V2ActorCritic,
     steps: int,
     opponent_mix: OpponentMixConfig,
-    checkpoint_policies: list[RustCandidateActorCritic] | None = None,
+    checkpoint_policies: list[Big2V2ActorCritic] | None = None,
     rng: random.Random | None = None,
     initial_batch: RustBatch | None = None,
-    step_penalty: float = 0.0,
     terminal_reward_mode: TerminalRewardMode = "card_fraction",
     controller_assignment: ControllerAssignmentMode = "turn",
-    rollout_state: RustRolloutState | None = None,
+    rollout_state: Big2V2RolloutState | None = None,
     episode_step_counts: list[int] | None = None,
-) -> tuple[RustRolloutBuffer, RustBatch]:
+) -> tuple[Big2V2RolloutBuffer, RustBatch]:
     """Collect learner-controlled PPO records from a Rust vectorized env."""
 
     if rng is None:
         rng = random.Random()
     checkpoint_policies = checkpoint_policies or []
     batch = initial_batch if initial_batch is not None else env.reset()
-    buffer = RustRolloutBuffer()
+    buffer = Big2V2RolloutBuffer()
     if rollout_state is None:
-        rollout_state = RustRolloutState.create(batch.num_envs)
+        rollout_state = Big2V2RolloutState.create(batch.num_envs)
         if episode_step_counts is not None:
             rollout_state.episode_step_counts = episode_step_counts
     if episode_step_counts is not None and len(episode_step_counts) != batch.num_envs:
@@ -308,11 +307,11 @@ def collect_rollout(
             )
 
     policy.eval()
-    latest_learner_records: dict[tuple[int, int], RustRolloutRecord] = {}
+    latest_learner_records: dict[tuple[int, int], Big2V2RolloutRecord] = {}
     for _ in range(steps):
         buffer.observe_candidate_counts(batch)
         action_ids = torch.zeros(batch.num_envs, dtype=torch.long, device=batch.obs.device)
-        pending_records: dict[int, RustRolloutRecord] = {}
+        pending_records: dict[int, Big2V2RolloutRecord] = {}
         learner_indices: list[int] = []
         checkpoint_indices: dict[int, list[int]] = defaultdict(list)
 
@@ -368,7 +367,8 @@ def collect_rollout(
             )
             action_ids[idx] = selection.move_ids
             for local_idx, env_idx in enumerate(learner_indices):
-                pending_records[env_idx] = RustRolloutRecord(
+                move_id = int(selection.move_ids[local_idx].item())
+                pending_records[env_idx] = Big2V2RolloutRecord(
                     env_index=env_idx,
                     player=int(batch.current_player[env_idx].item()),
                     obs=batch.obs[env_idx].detach().cpu(),
@@ -378,10 +378,10 @@ def collect_rollout(
                     move_id=selection.move_ids[local_idx].detach().cpu(),
                     old_logprob=selection.logprobs[local_idx].detach().cpu(),
                     value=selection.values[local_idx].detach().cpu(),
-                    reward=step_penalty,
+                    reward=0.0,
                     done=False,
                 )
-                buffer.observe_action("learner", int(selection.move_ids[local_idx].item()), env.metadata)
+                buffer.observe_action("learner", move_id, env.metadata)
                 candidate_count = int(batch.candidate_mask[env_idx].sum().item())
                 buffer.observe_learner_entropy(candidate_count, float(selection.entropy[local_idx].item()))
 
@@ -407,7 +407,7 @@ def collect_rollout(
             player = record.player
             reward = record.reward
             buffer.append(
-                RustRolloutRecord(
+                Big2V2RolloutRecord(
                     env_index=record.env_index,
                     player=record.player,
                     obs=record.obs,
@@ -475,10 +475,10 @@ def _terminal_rewards(final_rewards: torch.Tensor, mode: TerminalRewardMode) -> 
 @torch.no_grad()
 def _observe_bootstrap_values(
     *,
-    buffer: RustRolloutBuffer,
+    buffer: Big2V2RolloutBuffer,
     batch: RustBatch,
-    policy: RustCandidateActorCritic,
-    state: RustRolloutState,
+    policy: Big2V2ActorCritic,
+    state: Big2V2RolloutState,
     opponent_mix: OpponentMixConfig,
     controller_assignment: ControllerAssignmentMode,
     rng: random.Random,

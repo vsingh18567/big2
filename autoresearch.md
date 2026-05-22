@@ -1,7 +1,7 @@
 # Autoresearch big2
 
 ## Goal
-Build the strongest possible RL-powered Big 2 bot using the existing PyTorch PPO trainer and Rust simulator. The current exploratory run writes max-logging metrics to `runs/rust_ppo/train_metrics_256env_128cand.jsonl`; use that file to understand the baseline behavior, available metrics, eval cadence, and runtime. Read docs/wiki to understand the whole system.
+Build the strongest possible RL-powered Big 2 bot using the existing PyTorch PPO trainer and Rust simulator. The current exploratory run writes max-logging metrics to `runs/big2_v2/train_metrics_256env_128cand.jsonl`; use that file to understand the baseline behavior, available metrics, eval cadence, and runtime. Read docs/wiki to understand the whole system.
 
 Primary objective: improve evaluation performance against the `smart` and `greedy` bots. Performance against `random` is useful as a sanity check, but it is not the optimization target.
 

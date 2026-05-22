@@ -4,7 +4,7 @@
 
 The curriculum/checkpoint-league run did not materially break the plateau. The
 best observed point was batch `450` from
-`runs/rust_ppo/terminal_credit_league_500_seed442_metrics_v2.jsonl`:
+`runs/big2_v2/terminal_credit_league_500_seed442_metrics_v2.jsonl`:
 `greedy=0.518`, `smart=0.355`, combined `0.873`. The final batch regressed to
 `greedy=0.503`, `smart=0.321`. This is not close enough to the target
 (`greedy>0.600`, `smart>0.400`) to justify more schedule-only tuning.
@@ -25,9 +25,9 @@ Two structural issues were identified and patched next:
 
 Verification:
 
-- `uv run pytest big2/training/rust_ppo/tests/test_rust_ppo.py -q`:
+- `uv run pytest big2/training/big2_v2/tests/test_big2_v2.py -q`:
   `20 passed`
-- `uvx ruff check big2/training/rust_ppo/config.py big2/training/rust_ppo/rollout.py big2/training/rust_ppo/update.py big2/training/rust_ppo/run.py big2/training/rust_ppo/tests/test_rust_ppo.py`:
+- `uvx ruff check big2/training/big2_v2/config.py big2/training/big2_v2/rollout.py big2/training/big2_v2/update.py big2/training/big2_v2/run.py big2/training/big2_v2/tests/test_big2_v2.py`:
   clean
 
 Next experiment: initialize from the best prior checkpoint, but train with
@@ -38,7 +38,7 @@ only as frozen opponent diversity, not as the main curriculum explanation.
 Started run:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run \
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run \
   --train \
   --resume \
   --batches 900 \
@@ -56,7 +56,7 @@ Started run:
   --smart-weight 0.35 \
   --checkpoint-opponent-weight 0.15 \
   --seed 442 \
-  --checkpoint-opponent-dir runs/rust_ppo/terminal_credit_league_500_seed442_v2_checkpoints \
+  --checkpoint-opponent-dir runs/big2_v2/terminal_credit_league_500_seed442_v2_checkpoints \
   --checkpoint-opponent-limit 6 \
   --checkpoint-opponent-stride 25 \
   --eval-interval 25 \
@@ -65,8 +65,8 @@ Started run:
   --checkpoint-interval 25 \
   --logging-mode max \
   --device cpu \
-  --metrics-path runs/rust_ppo/single_learner_bootstrap_seed442_metrics.jsonl \
-  --checkpoint-dir runs/rust_ppo/single_learner_bootstrap_seed442_checkpoints
+  --metrics-path runs/big2_v2/single_learner_bootstrap_seed442_metrics.jsonl \
+  --checkpoint-dir runs/big2_v2/single_learner_bootstrap_seed442_checkpoints
 ```
 
 Early sanity check after batches `451-453`: controller assignment is fixed-seat
@@ -101,7 +101,7 @@ value paths. It can be warm-started from the batch-450 checkpoint via
 new context layers from scratch.
 
 Candidate-context run started:
-`runs/rust_ppo/candidate_context_single_learner_seed1442_metrics.jsonl`.
+`runs/big2_v2/candidate_context_single_learner_seed1442_metrics.jsonl`.
 Initial batch-25 eval: `greedy=0.537`, `smart=0.352`, combined `0.889`.
 This is the best combined score observed so far and suggests the candidate-set
 context may help against greedy, but it is not yet a smart-opponent
@@ -130,12 +130,12 @@ batch tensor. It was semantically right because these are action-conditioned
 `f(state, action)` features, not global observation state, but operationally
 wrong: with `512` envs, `256` padded candidates, and `92` floats per candidate
 it moves roughly `48 MB` per env step, mostly padding. The first attempted
-dynamic run at `runs/rust_ppo/dynamic_action_context_seed2442_metrics.jsonl`
+dynamic run at `runs/big2_v2/dynamic_action_context_seed2442_metrics.jsonl`
 only wrote its config row before being killed.
 
 Final implementation keeps the Rust/Python batch API lean (`obs`,
 `candidate_ids`, `candidate_mask`) and computes dynamic candidate-outcome
-features inside `RustCandidateActorCritic` from existing tensors:
+features inside `Big2V2ActorCritic` from existing tensors:
 
 - `obs[:, 0:52]`: current player's actual hand
 - `move_features[candidate_ids][:, :, 0:52]`: candidate card mask
@@ -175,7 +175,7 @@ Verification:
 - `cargo test --manifest-path big2-rust/Cargo.toml`: clean
 - `uvx maturin develop --manifest-path big2-rust/Cargo.toml`: rebuilt editable
   Python extension
-- `uv run pytest big2/training/rust_ppo/tests/test_rust_ppo.py -q`:
+- `uv run pytest big2/training/big2_v2/tests/test_big2_v2.py -q`:
   `28 passed`
 - `uvx ruff check ...`: clean
 - CLI smoke with `--candidate-set-context --dynamic-action-features
@@ -188,7 +188,7 @@ all-greedy, and a small frozen-checkpoint profile. This should build general
 strength while still applying direct pressure to the explicit thresholds.
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run \
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run \
   --train \
   --batches 300 \
   --num-envs 512 \
@@ -201,7 +201,7 @@ strength while still applying direct pressure to the explicit thresholds.
   --candidate-set-context \
   --dynamic-action-features \
   --terminal-reward-mode win-loss \
-  --init-checkpoint runs/rust_ppo/candidate_context_single_learner_seed1442_checkpoints/batch_000100.pt \
+  --init-checkpoint runs/big2_v2/candidate_context_single_learner_seed1442_checkpoints/batch_000100.pt \
   --controller-assignment table-profile \
   --learner-weight 0.55 \
   --random-weight 0.0 \
@@ -209,7 +209,7 @@ strength while still applying direct pressure to the explicit thresholds.
   --smart-weight 0.20 \
   --checkpoint-opponent-weight 0.05 \
   --seed 2442 \
-  --checkpoint-opponent-dir runs/rust_ppo/terminal_credit_league_500_seed442_v2_checkpoints \
+  --checkpoint-opponent-dir runs/big2_v2/terminal_credit_league_500_seed442_v2_checkpoints \
   --checkpoint-opponent-limit 4 \
   --checkpoint-opponent-stride 25 \
   --eval-interval 25 \
@@ -218,8 +218,8 @@ strength while still applying direct pressure to the explicit thresholds.
   --checkpoint-interval 25 \
   --logging-mode max \
   --device cpu \
-  --metrics-path runs/rust_ppo/dynamic_action_winloss_table_profiles_seed2442_metrics.jsonl \
-  --checkpoint-dir runs/rust_ppo/dynamic_action_winloss_table_profiles_seed2442_checkpoints
+  --metrics-path runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_metrics.jsonl \
+  --checkpoint-dir runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints
 ```
 
 Let this run at least `100` batches before judging it. The old
@@ -227,7 +227,7 @@ Let this run at least `100` batches before judging it. The old
 contains a config-only row from the killed dense-transfer attempt.
 
 Launched at `2026-05-19 20:56 PDT`:
-`runs/rust_ppo/dynamic_action_winloss_table_profiles_seed2442_metrics.jsonl`.
+`runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_metrics.jsonl`.
 Batch `1` completed in `58.5s` with `43,325` learner samples, no candidate
 truncation, KL `0.018`, clip fraction `0.087`, entropy `0.178`, and value EV
 `0.383`. Controller counts confirm the intended table-profile mixture:
@@ -439,9 +439,235 @@ Batch `650` eval: greedy `0.646`, smart `0.475`, combined `1.120`; random
 not recover toward `1.179`. Health remained stable through the endpoint:
 no truncation, KL `0.0074`, clip fraction `0.058`, entropy `0.256`, value EV
 `0.469`. Best checkpoint for this run is batch `550`:
-`runs/rust_ppo/dynamic_action_winloss_table_profiles_seed2442_checkpoints/batch_000550.pt`.
+`runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints/batch_000550.pt`.
 Stop this recipe here; further progress likely needs a new intervention rather
 than more unchanged training.
+
+## 2026-05-20 Update: Post-Best Improvement Search
+
+Committed the current strong state as git commit `4bb8f5f`
+(`Improve Big2 v2 training plateau`). The next objective is not to prove the
+old threshold anymore; it is to see whether we can improve beyond the best
+batch-550 result (`greedy=0.680`, `smart=0.499`, combined `1.179`).
+
+Next experiment: start from the best batch-550 checkpoint, reset the optimizer,
+and train against the stronger dynamic-action league instead of the older
+terminal-credit checkpoint league. Keep self-play as the core (`0.55` full
+learner tables), but allocate more table profiles to current-run checkpoint
+opponents. Use a mild entropy schedule (`0.03 -> 0.015`) to reopen exploration
+early without turning this into a random-search run.
+
+Started run:
+
+```sh
+.venv/bin/python -m big2.training.big2_v2.run \
+  --train \
+  --batches 300 \
+  --num-envs 512 \
+  --rollout-steps 128 \
+  --max-candidates 256 \
+  --ppo-epochs 2 \
+  --mini-batch-size 2048 \
+  --lr 0.0003 \
+  --entropy-coef 0.02 \
+  --entropy-schedule linear \
+  --entropy-start-coef 0.03 \
+  --entropy-end-coef 0.015 \
+  --entropy-schedule-batches 300 \
+  --candidate-set-context \
+  --dynamic-action-features \
+  --terminal-reward-mode win-loss \
+  --init-checkpoint runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints/batch_000550.pt \
+  --controller-assignment table-profile \
+  --learner-weight 0.55 \
+  --random-weight 0.0 \
+  --greedy-weight 0.15 \
+  --smart-weight 0.15 \
+  --checkpoint-opponent-weight 0.15 \
+  --seed 3550 \
+  --checkpoint-opponent-dir runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints \
+  --checkpoint-opponent-limit 8 \
+  --checkpoint-opponent-stride 25 \
+  --eval-interval 25 \
+  --eval-games 512 \
+  --eval-num-envs 128 \
+  --checkpoint-interval 25 \
+  --logging-mode max \
+  --device cpu \
+  --metrics-path runs/big2_v2/self_league_from_best550_seed3550_metrics.jsonl \
+  --checkpoint-dir runs/big2_v2/self_league_from_best550_seed3550_checkpoints
+```
+
+Batch `25` eval for `self_league_from_best550_seed3550`: greedy `0.652`,
+smart `0.480`, combined `1.132`; random `0.874`. This is below the batch-550
+baseline (`1.179`) and close to the post-spike plateau band, so it is not yet
+an improvement. Do not stop this run on batch `25`: the intervention is
+explicitly changing the training distribution, entropy is much higher
+(`0.324` versus roughly `0.25-0.27` late in the prior run), and PPO health is
+stable: no truncation, KL `0.0064`, clip fraction `0.057`, value EV `0.471`,
+action probability p10 `0.333`. Continue to at least batch `100` unless health
+breaks; the useful question is whether the league pressure plus reopened
+exploration recovers past the `1.18` combined mark or just settles back into
+the old `1.11-1.14` band.
+
+Batch `50` eval: greedy `0.679`, smart `0.463`, combined `1.142`; random
+`0.873`. The greedy matchup recovered almost exactly to the batch-550 level,
+but smart regressed from the batch-550 high (`0.499`) and sits inside the old
+post-spike band. This keeps the run alive but weakens the hypothesis that
+checkpoint-league pressure alone fixes the plateau. Health remains good:
+no truncation, KL `0.0065`, clip fraction `0.053`, entropy `0.332`, value EV
+`0.487`, action probability p10 `0.331`. Continue to batch `100`; if smart
+does not move back toward `0.50`, the next intervention should target
+weakness discovery or representation, not just more league mixing.
+
+Batch `75` eval: greedy `0.646`, smart `0.462`, combined `1.107`; random
+`0.857`. This is worse than both batch `25` and batch `50`, and it is now
+below the old high-band plateau. There is still no optimizer-health failure:
+no truncation, KL `0.0067`, clip fraction `0.055`, entropy `0.308`, value EV
+`0.467`, action probability p10 `0.358`. The issue appears behavioral: this
+recipe is not preserving the batch-550 smart-matchup strength while continuing
+training. Continue to batch `100` for the minimum agreed evidence window, but
+the likely next step is a targeted weakness evaluator or feature change rather
+than more of this same continuation.
+
+Batch `100` eval: greedy `0.648`, smart `0.461`, combined `1.110`; random
+`0.860`. This confirms the run is not improving after the agreed minimum
+window. PPO health still looks normal: no truncation, KL `0.0068`, clip
+fraction `0.058`, entropy `0.306`, value EV `0.486`, action probability p10
+`0.351`. Stopped the run after batch `100` because it has regressed versus the
+best checkpoint and versus batch `50` without any sign that waiting longer is
+solving the smart-matchup weakness. Added a diagnostic CLI,
+`big2/training/big2_v2/diagnose_policy.py`, to bin deterministic evaluation
+decisions by game situation and surface where losses concentrate.
+
+Diagnostic pass over the best batch-550 checkpoint (`512` games per seat
+against greedy and smart) points to response-state weakness rather than lead
+conversion weakness. The model is very strong when it has the lead and few
+cards left, but weak buckets cluster around forced response states, optional
+response passes, and smart-opponent full-house responses. Excluding forced
+single-candidate states, the clearest actionable bucket is optional response
+passing: against greedy, optional passes had decision-weighted WR `0.557`
+versus a `0.666` baseline (`-0.109`); against smart they had WR `0.404`
+versus a `0.453` baseline (`-0.049`). This suggests trying a small optional
+pass penalty, not a blanket pass penalty, because forced passes are symptoms
+of bad positions and should not be punished.
+
+Implemented `--pass-penalty`, `--progress-reward-coef`, and `--step-penalty`
+CLI wiring for the existing config knobs. `--pass-penalty` only applies when
+the learner chooses Pass while at least one legal non-pass move exists. Added a
+targeted regression test for this behavior; `29` Big2 v2 tests pass.
+
+Started follow-up run:
+
+```sh
+.venv/bin/python -m big2.training.big2_v2.run \
+  --train \
+  --batches 175 \
+  --num-envs 512 \
+  --rollout-steps 128 \
+  --max-candidates 256 \
+  --ppo-epochs 2 \
+  --mini-batch-size 2048 \
+  --lr 0.0002 \
+  --entropy-coef 0.012 \
+  --candidate-set-context \
+  --dynamic-action-features \
+  --terminal-reward-mode win-loss \
+  --pass-penalty -0.01 \
+  --init-checkpoint runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints/batch_000550.pt \
+  --controller-assignment table-profile \
+  --learner-weight 0.60 \
+  --random-weight 0.0 \
+  --greedy-weight 0.10 \
+  --smart-weight 0.15 \
+  --checkpoint-opponent-weight 0.15 \
+  --seed 4550 \
+  --checkpoint-opponent-dir runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints \
+  --checkpoint-opponent-limit 8 \
+  --checkpoint-opponent-stride 25 \
+  --eval-interval 25 \
+  --eval-games 512 \
+  --eval-num-envs 128 \
+  --checkpoint-interval 25 \
+  --logging-mode max \
+  --device cpu \
+  --metrics-path runs/big2_v2/optional_pass_penalty_from_best550_seed4550_metrics.jsonl \
+  --checkpoint-dir runs/big2_v2/optional_pass_penalty_from_best550_seed4550_checkpoints
+```
+
+Result: the optional-pass penalty run did **not** improve the best checkpoint.
+It was mechanically stable but behaviorally regressed after the agreed
+100-batch window:
+
+| batch | random wr | greedy wr | smart wr | smart+greedy | entropy | KL | pass rate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 25 | 0.872 | 0.664 | 0.466 | 1.130 | 0.224 | 0.0055 | 0.492 |
+| 50 | 0.857 | 0.662 | 0.477 | 1.139 | 0.205 | 0.0048 | 0.489 |
+| 75 | 0.866 | 0.665 | 0.479 | 1.144 | 0.195 | 0.0055 | 0.486 |
+| 100 | 0.840 | 0.636 | 0.459 | 1.095 | 0.191 | 0.0056 | 0.485 |
+
+Interpretation: a small optional-pass penalty slightly nudged the 25->75
+trend upward but did not solve the weakness. By batch `100`, both greedy and
+smart matchups had fallen materially below the batch-550 baseline
+(`1.179`). PPO health was not the failure mode: KL, clip fraction, value EV,
+and candidate truncation remained normal. The failure mode looks like behavior
+narrowing: entropy and pass rate drifted down, but the policy did not learn a
+better response strategy.
+
+Next intervention: improve representation, not reward shaping. The dynamic
+action encoder now includes candidate-relative features that directly expose
+whether a pass is optional or forced, how many playable alternatives exist, how
+strong the selected move is versus weakest/strongest legal non-pass moves, and
+whether a same-kind response is the cheapest available same-kind response.
+This targets the diagnostic findings more cleanly than a scalar penalty,
+especially optional response passing and full-house response states. The
+checkpoint partial loader now prefix-loads old `candidate_outcome_encoder`
+weights when the dynamic feature vector expands, preserving the old 92
+features and zero-initializing only the new columns. Focused Big2 v2 tests:
+`31 passed`.
+
+Started structural follow-up run:
+
+```sh
+.venv/bin/python -m big2.training.big2_v2.run \
+  --train \
+  --batches 175 \
+  --num-envs 512 \
+  --rollout-steps 128 \
+  --max-candidates 256 \
+  --ppo-epochs 2 \
+  --mini-batch-size 2048 \
+  --lr 0.0002 \
+  --entropy-coef 0.012 \
+  --candidate-set-context \
+  --dynamic-action-features \
+  --terminal-reward-mode win-loss \
+  --init-checkpoint runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints/batch_000550.pt \
+  --controller-assignment table-profile \
+  --learner-weight 0.60 \
+  --random-weight 0.0 \
+  --greedy-weight 0.10 \
+  --smart-weight 0.15 \
+  --checkpoint-opponent-weight 0.15 \
+  --seed 5651 \
+  --checkpoint-opponent-dir runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints \
+  --checkpoint-opponent-limit 8 \
+  --checkpoint-opponent-stride 25 \
+  --eval-interval 25 \
+  --eval-games 512 \
+  --eval-num-envs 128 \
+  --checkpoint-interval 25 \
+  --logging-mode max \
+  --device cpu \
+  --metrics-path runs/big2_v2/relative_action_features_from_best550_seed5651_metrics.jsonl \
+  --checkpoint-dir runs/big2_v2/relative_action_features_from_best550_seed5651_checkpoints
+```
+
+Early health through batch `5`: no truncation, KL `0.004-0.006`, clip
+fraction `0.040-0.057`, value EV `0.44-0.49`. Entropy is initially higher
+than the best checkpoint (`0.25-0.28`) because the expanded feature encoder is
+adapting, but this is still within a stable PPO range. Wait for at least batch
+`100` unless optimizer health breaks; batch `25` is only an initial signal.
 
 ## 2026-05-16 Update: Current System Direction
 
@@ -449,14 +675,14 @@ The terminal-credit rollout fix has been promoted into the active
 `vikrams-rust` checkout. The fix credits each learner-controlled seat's final
 terminal reward to that seat's latest learner record in the episode, rather
 than only rewarding the learner if it happened to take the terminal action. The
-targeted regression test for this behavior is now part of the Rust PPO test
+targeted regression test for this behavior is now part of the Big2 v2 test
 suite.
 
 After promoting the fix, we ran a longer fresh seed-442 continuation-style
 experiment with the same default opponent mix and PPO settings:
 
-- metrics: `runs/rust_ppo/terminal_credit_500_seed442_metrics.jsonl`
-- checkpoints: `runs/rust_ppo/terminal_credit_500_seed442_checkpoints`
+- metrics: `runs/big2_v2/terminal_credit_500_seed442_metrics.jsonl`
+- checkpoints: `runs/big2_v2/terminal_credit_500_seed442_checkpoints`
 - settings: `lr=3e-4`, `entropy_coef=0.01`, `num_envs=256`,
   `rollout_steps=128`, `max_candidates=256`, default mix
   learner/random/greedy/smart = `0.75/0.10/0.10/0.05`
@@ -519,7 +745,7 @@ checkpoint save.
 Recommended next run:
 
 ```sh
-/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.rust_ppo.run \
+/Users/vikramsingh/Desktop/coding/big2/.venv/bin/python -m big2.training.big2_v2.run \
   --train \
   --batches 500 \
   --num-envs 256 \
@@ -539,8 +765,8 @@ Recommended next run:
   --checkpoint-interval 25 \
   --logging-mode max \
   --device cpu \
-  --metrics-path runs/rust_ppo/terminal_credit_league_500_seed442_metrics.jsonl \
-  --checkpoint-dir runs/rust_ppo/terminal_credit_league_500_seed442_checkpoints
+  --metrics-path runs/big2_v2/terminal_credit_league_500_seed442_metrics.jsonl \
+  --checkpoint-dir runs/big2_v2/terminal_credit_league_500_seed442_checkpoints
 ```
 
 Hypothesis for this next run: once the policy crosses the `0.70`, `0.80`, and
@@ -656,3 +882,113 @@ Charts:
 - Value loss is useful only with value explained variance. A run can show higher value loss because the reward signal is stronger or less sparse, while still fitting value targets better.
 - Stable PPO here means KL mostly below about `0.03`, clip fraction mostly below about `0.20`, no candidate truncation, entropy declining gradually rather than collapsing, and value EV improving or staying positive.
 - Eval differences below roughly 2-3 percentage points are within the noise of a 1024-game aggregate; persistent direction over multiple checkpoints matters more.
+
+## 2026-05-20 Update: Best-550 Follow-Up Attempts
+
+Committed strong baseline state:
+
+- Commit: `4bb8f5fa0dafa8c17ad6a2c3fd70ccd6458f2a04`
+- Reference checkpoint: `runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints/batch_000550.pt`
+- Reference eval at batch `550`: random `0.887`, greedy `0.680`, smart `0.499`, greedy+smart `1.179`
+
+Weakness diagnostics on the best-550 checkpoint found that the model is already
+very strong at endgame lead conversion, but weaker when the response choice
+includes an optional pass and against some higher-order response contexts:
+
+- vs greedy optional-pass response bucket: win rate `0.557`, delta vs overall `-0.109`
+- vs smart optional-pass response bucket: win rate `0.404`, delta vs overall `-0.049`
+- vs smart full-house response bucket: win rate `0.371`, delta vs overall `-0.082`
+- vs smart large-hand bucket (`10-13` cards): win rate `0.393`, delta vs overall `-0.060`
+
+Attempts so far from the best-550 checkpoint:
+
+| run | best batch | random | greedy | smart | greedy+smart | decision |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `self_league_from_best550_seed3550` | 50 | 0.873 | 0.679 | 0.463 | 1.142 | reject: drifted below baseline by batch 100 |
+| `optional_pass_penalty_from_best550_seed4550` | 75 | 0.866 | 0.665 | 0.479 | 1.144 | reject: optional pass shaping regressed by batch 100 |
+| `relative_action_features_from_best550_seed5651` | 175 | 0.856 | 0.670 | 0.488 | 1.158 | reject as replacement: best late point still below best-550 |
+
+The relative-action feature run is not an optimizer failure. At batch `175`,
+KL was `0.0053`, clip fraction `0.0396`, entropy `0.178`, value EV `0.470`,
+and candidate truncation stayed at `0`. The issue is behavioral: the policy
+kept training stably but did not surpass the reference checkpoint.
+
+New tooling added:
+
+- `big2/training/big2_v2/diagnose_policy.py`: bins deterministic policy
+  decisions by context and reports weakness/strength buckets against random,
+  greedy, and smart opponents.
+- `big2/training/big2_v2/evaluate_checkpoint_match.py`: evaluates one policy
+  checkpoint seat against another policy checkpoint controlling the other
+  seats. A best-550 self-match smoke test produced near-25% all-seat win rates,
+  as expected for same-policy play with seat variance.
+
+Next active hypothesis: the scorer may need a more expressive nonlinear
+state/action interaction, but the starting policy should not be perturbed.
+Implemented `--pairwise-action-head`, a zero-initialized residual logit head
+over `[state_action_h, action_h, state_action_h * action_h]`. Because the final
+layer is initialized to zero, enabling it starts with identical logits to the
+warm-started model, then lets PPO learn residual corrections.
+
+Active run:
+
+```sh
+.venv/bin/python -m big2.training.big2_v2.run \
+  --train \
+  --batches 250 \
+  --num-envs 512 \
+  --rollout-steps 128 \
+  --max-candidates 256 \
+  --ppo-epochs 2 \
+  --mini-batch-size 2048 \
+  --lr 0.0001 \
+  --entropy-coef 0.010 \
+  --candidate-set-context \
+  --dynamic-action-features \
+  --pairwise-action-head \
+  --pairwise-action-hidden 128 \
+  --terminal-reward-mode win-loss \
+  --init-checkpoint runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints/batch_000550.pt \
+  --controller-assignment table-profile \
+  --learner-weight 0.65 \
+  --random-weight 0.0 \
+  --greedy-weight 0.10 \
+  --smart-weight 0.10 \
+  --checkpoint-opponent-weight 0.15 \
+  --seed 6751 \
+  --checkpoint-opponent-dir runs/big2_v2/dynamic_action_winloss_table_profiles_seed2442_checkpoints \
+  --checkpoint-opponent-limit 8 \
+  --checkpoint-opponent-stride 25 \
+  --eval-interval 25 \
+  --eval-games 512 \
+  --eval-num-envs 128 \
+  --checkpoint-interval 25 \
+  --logging-mode max \
+  --device cpu \
+  --metrics-path runs/big2_v2/pairwise_residual_from_best550_seed6751_metrics.jsonl \
+  --checkpoint-dir runs/big2_v2/pairwise_residual_from_best550_seed6751_checkpoints
+```
+
+Verification before launch:
+
+- `.venv/bin/python -m pytest big2/training/big2_v2/tests/test_big2_v2.py -q`:
+  `32 passed`
+
+Batch `25` read:
+
+- Eval: random `0.880`, greedy `0.670`, smart `0.476`, greedy+smart `1.146`
+- PPO health: KL `~0.002`, clip fraction `~0.02`, entropy `~0.22`, value EV `~0.48`
+- Decision: continue. This is below the best-550 reference combined score
+  (`1.179`), but not mechanically broken. Because the residual head starts at
+  zero and is training with low LR, judge no earlier than batch `100` unless
+  win rates collapse or the run destabilizes.
+
+Batch `50` read:
+
+- Eval: random `0.852`, greedy `0.655`, smart `0.478`, greedy+smart `1.132`
+- PPO health remains stable: KL `~0.002`, clip fraction `~0.02`, entropy
+  `~0.193`, value EV `~0.465`
+- Decision: continue only because the minimum decision horizon is batch `100`.
+  This is not currently an improvement path: greedy regressed from batch `25`,
+  smart only held flat, and the combined score moved farther below the
+  reference checkpoint.

@@ -13,23 +13,23 @@ from typing import Any
 
 import torch
 
-from big2.training.rust_ppo.checkpoints import (
+from big2.training.big2_v2.checkpoints import (
     find_latest_checkpoint,
     load_checkpoint,
     load_checkpoint_partial,
     save_checkpoint,
 )
-from big2.training.rust_ppo.config import LoggingMode, OpponentMixConfig, RustPPOConfig
-from big2.training.rust_ppo.curriculum import (
+from big2.training.big2_v2.config import LoggingMode, OpponentMixConfig, Big2V2Config
+from big2.training.big2_v2.curriculum import (
     TrainingControls,
     smart_greedy_score_from_evals,
     training_controls_for_batch,
 )
-from big2.training.rust_ppo.env_adapter import RustVecEnvAdapter
-from big2.training.rust_ppo.evaluate import evaluate_policy
-from big2.training.rust_ppo.model import RustCandidateActorCritic
-from big2.training.rust_ppo.rollout import RustRolloutState, collect_rollout
-from big2.training.rust_ppo.update import ppo_update
+from big2.training.big2_v2.env_adapter import RustVecEnvAdapter
+from big2.training.big2_v2.evaluate import evaluate_policy
+from big2.training.big2_v2.model import Big2V2ActorCritic
+from big2.training.big2_v2.rollout import Big2V2RolloutState, collect_rollout
+from big2.training.big2_v2.update import ppo_update
 
 SMART_GREEDY_DEFAULT_MIX = OpponentMixConfig(
     learner_weight=0.75,
@@ -48,25 +48,25 @@ OPPONENT_WEIGHT_ARGS = {
 
 @dataclass(frozen=True)
 class CheckpointOpponentPool:
-    policies: list[RustCandidateActorCritic]
+    policies: list[Big2V2ActorCritic]
     paths: list[Path]
 
 
 def build_policy(
     env: RustVecEnvAdapter,
-    config: RustPPOConfig,
+    config: Big2V2Config,
     *,
     obs_dim: int | None = None,
     candidate_set_context: bool | None = None,
     dynamic_action_features: bool | None = None,
-) -> RustCandidateActorCritic:
+) -> Big2V2ActorCritic:
     if obs_dim is None:
         obs_dim = env.reset().obs_dim
     if candidate_set_context is None:
         candidate_set_context = config.candidate_set_context
     if dynamic_action_features is None:
         dynamic_action_features = config.dynamic_action_features
-    return RustCandidateActorCritic(
+    return Big2V2ActorCritic(
         obs_dim=obs_dim,
         num_actions=env.num_actions,
         move_features=env.metadata.as_tensor(config.device),
@@ -79,7 +79,7 @@ def build_policy(
     ).to(config.device)
 
 
-def run_smoke(config: RustPPOConfig) -> None:
+def run_smoke(config: Big2V2Config) -> None:
     torch.manual_seed(config.seed)
     rng = random.Random(config.seed)
     env = RustVecEnvAdapter(
@@ -99,7 +99,6 @@ def run_smoke(config: RustPPOConfig) -> None:
         opponent_mix=controls.opponent_mix,
         rng=rng,
         initial_batch=batch,
-        step_penalty=config.step_penalty,
         terminal_reward_mode=config.terminal_reward_mode,
         controller_assignment=config.controller_assignment,
     )
@@ -117,10 +116,10 @@ def run_smoke(config: RustPPOConfig) -> None:
         max_grad_norm=config.max_grad_norm,
         device=config.device,
     )
-    print(f"rust_ppo smoke: samples={stats.samples} loss={stats.total_loss:.4f} entropy={stats.entropy:.4f}")
+    print(f"big2_v2 smoke: samples={stats.samples} loss={stats.total_loss:.4f} entropy={stats.entropy:.4f}")
 
 
-def run_training(config: RustPPOConfig, *, resume: bool = False) -> None:
+def run_training(config: Big2V2Config, *, resume: bool = False) -> None:
     torch.manual_seed(config.seed)
     rng = random.Random(config.seed)
     env = RustVecEnvAdapter(
@@ -149,7 +148,7 @@ def run_training(config: RustPPOConfig, *, resume: bool = False) -> None:
 
     checkpoint_opponent_pool = _load_checkpoint_opponent_pool(env, config, obs_dim=batch.obs_dim)
     metrics_path.parent.mkdir(parents=True, exist_ok=True) if metrics_path.parent != Path("") else None
-    rollout_state = RustRolloutState.create(config.num_envs)
+    rollout_state = Big2V2RolloutState.create(config.num_envs)
     config_row = {
         "event": "config",
         "config": asdict(config),
@@ -174,7 +173,6 @@ def run_training(config: RustPPOConfig, *, resume: bool = False) -> None:
             opponent_mix=controls.opponent_mix,
             rng=rng,
             initial_batch=batch,
-            step_penalty=config.step_penalty,
             terminal_reward_mode=config.terminal_reward_mode,
             controller_assignment=config.controller_assignment,
             rollout_state=rollout_state,
@@ -257,7 +255,7 @@ def _build_training_row(
     batch_idx: int,
     stats,
     buffer,
-    config: RustPPOConfig,
+    config: Big2V2Config,
     rollout_seconds: float,
     update_seconds: float,
     controls: TrainingControls | None = None,
@@ -363,7 +361,7 @@ def _build_training_row(
     return row
 
 
-def _run_evals(*, policy: RustCandidateActorCritic, config: RustPPOConfig, batch_idx: int) -> dict[str, Any]:
+def _run_evals(*, policy: Big2V2ActorCritic, config: Big2V2Config, batch_idx: int) -> dict[str, Any]:
     evals: dict[str, Any] = {}
     seats = range(4) if config.eval_all_seats else (config.eval_policy_seat,)
     for opponent in ("random", "greedy", "smart"):
@@ -403,12 +401,12 @@ def _run_evals(*, policy: RustCandidateActorCritic, config: RustPPOConfig, batch
 
 def _load_checkpoint_opponent_pool(
     env: RustVecEnvAdapter,
-    config: RustPPOConfig,
+    config: Big2V2Config,
     *,
     obs_dim: int,
 ) -> CheckpointOpponentPool:
     paths = _checkpoint_opponent_paths(config)
-    policies: list[RustCandidateActorCritic] = []
+    policies: list[Big2V2ActorCritic] = []
     for path in paths:
         opponent = build_policy(
             env,
@@ -417,7 +415,7 @@ def _load_checkpoint_opponent_pool(
             candidate_set_context=_checkpoint_uses_candidate_set_context(path, device=config.device),
             dynamic_action_features=_checkpoint_uses_dynamic_action_features(path, device=config.device),
         )
-        load_checkpoint(path=path, policy=opponent, optimizer=None, map_location=config.device)
+        load_checkpoint_partial(path=path, policy=opponent, map_location=config.device)
         opponent.eval()
         for param in opponent.parameters():
             param.requires_grad_(False)
@@ -435,7 +433,7 @@ def _checkpoint_uses_dynamic_action_features(path: Path, *, device: str) -> bool
     return any(key.startswith("candidate_outcome_encoder.") for key in payload.get("model_state", {}))
 
 
-def _checkpoint_opponent_paths(config: RustPPOConfig) -> list[Path]:
+def _checkpoint_opponent_paths(config: Big2V2Config) -> list[Path]:
     source_dir = Path(config.checkpoint_opponent_dir or config.checkpoint_dir)
     if not source_dir.exists():
         return []
@@ -555,7 +553,7 @@ def _git_commit() -> str | None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Smoke-run Rust-backed Big 2 PPO.")
+    parser = argparse.ArgumentParser(description="Smoke-run Big2 v2.")
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--batches", type=int, default=1)
@@ -565,35 +563,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ppo-epochs", type=int, default=2)
     parser.add_argument("--mini-batch-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--entropy-coef", type=float, default=0.01)
-    parser.add_argument("--candidate-set-context", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--dynamic-action-features", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--entropy-coef", type=float, default=0.02)
+    parser.add_argument("--candidate-set-context", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--dynamic-action-features", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--entropy-schedule", choices=("constant", "linear"), default="constant")
     parser.add_argument("--entropy-start-coef", type=float, default=None)
     parser.add_argument("--entropy-end-coef", type=float, default=None)
     parser.add_argument("--entropy-schedule-batches", type=int, default=0)
-    parser.add_argument("--terminal-reward-mode", choices=("card-fraction", "win-loss"), default="card-fraction")
+    parser.add_argument("--terminal-reward-mode", choices=("card-fraction", "win-loss"), default="win-loss")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--greedy-weight", type=float, default=0.0)
-    parser.add_argument("--smart-weight", type=float, default=0.0)
+    parser.add_argument("--greedy-weight", type=float, default=0.20)
+    parser.add_argument("--smart-weight", type=float, default=0.20)
     parser.add_argument("--random-weight", type=float, default=0.0)
-    parser.add_argument("--learner-weight", type=float, default=1.0)
-    parser.add_argument("--checkpoint-opponent-weight", type=float, default=0.0)
+    parser.add_argument("--learner-weight", type=float, default=0.55)
+    parser.add_argument("--checkpoint-opponent-weight", type=float, default=0.05)
     parser.add_argument(
         "--controller-assignment",
         choices=("turn", "episode-seat", "single-learner", "single-learner-uniform", "table-profile"),
-        default="turn",
+        default="table-profile",
     )
     parser.add_argument("--curriculum", choices=("off", "smart-greedy"), default="off")
-    parser.add_argument("--checkpoint-dir", default="rust_ppo_checkpoints")
+    parser.add_argument("--checkpoint-dir", default="big2_v2_checkpoints")
     parser.add_argument("--init-checkpoint", default=None)
     parser.add_argument("--checkpoint-interval", type=int, default=10)
     parser.add_argument("--checkpoint-opponent-dir", default=None)
     parser.add_argument("--checkpoint-opponent-limit", type=int, default=4)
     parser.add_argument("--checkpoint-opponent-stride", type=int, default=25)
     parser.add_argument("--checkpoint-opponent-refresh", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--metrics-path", default="rust_ppo_metrics.jsonl")
+    parser.add_argument("--metrics-path", default="big2_v2_metrics.jsonl")
     parser.add_argument("--eval-interval", type=int, default=10)
     parser.add_argument("--eval-games", type=int, default=64)
     parser.add_argument("--eval-num-envs", type=int, default=16)
@@ -624,7 +622,7 @@ def _opponent_mix_from_args(args: argparse.Namespace) -> OpponentMixConfig:
 def main() -> None:
     args = parse_args()
     opponent_mix = _opponent_mix_from_args(args)
-    config = RustPPOConfig(
+    config = Big2V2Config(
         num_envs=args.num_envs,
         batches=args.batches,
         rollout_steps=args.rollout_steps,

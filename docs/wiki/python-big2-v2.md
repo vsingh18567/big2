@@ -1,6 +1,6 @@
-# Python Rust PPO
+# Big2 v2 trainer
 
-This page documents the Python PPO layer in `big2/training/rust_ppo/`.
+This page documents the Python PPO layer in `big2/training/big2_v2/`.
 Python should stay light: it adapts Rust batches into tensors, runs the Torch
 policy/value model, performs PPO updates, and writes operational artifacts.
 Rust owns game compute: shuffle/reset, legal move generation, observations,
@@ -74,7 +74,7 @@ Rust. The current feature width is checked against `MOVE_FEATURE_DIM`, and
 
 ## Config and Entrypoint
 
-`RustPPOConfig` groups environment size, model dimensions, PPO hyperparameters,
+`Big2V2Config` groups environment size, model dimensions, PPO hyperparameters,
 opponent mix, device, checkpoint cadence, metrics path, and eval cadence.
 `OpponentMixConfig.normalized()` turns learner/random/greedy/smart/checkpoint
 weights into sampling probabilities.

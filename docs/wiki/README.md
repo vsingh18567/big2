@@ -1,6 +1,6 @@
 # Big 2 RL Wiki
 
-This wiki documents the current Rust-backed Big 2 reinforcement-learning stack.
+This wiki documents the current Big2 v2 Big 2 reinforcement-learning stack.
 It is organized by subsystem so the Rust game engine, Python PPO layer, and
 operational runbooks can evolve without turning one README into the source of
 all truth.
@@ -11,7 +11,7 @@ all truth.
   state, vectorized env semantics.
 - [Rust Python API](rust-python-api.md): PyO3/maturin module surface and batch
   tuple contract used by Python.
-- [Python Rust PPO](python-rust-ppo.md): Python package layout, adapter,
+- [Big2 v2 trainer](python-big2-v2.md): Python package layout, adapter,
   config, checkpoints, eval, and training entrypoint.
 - [Model and Rollout](model-and-rollout.md): actor-critic inputs/outputs,
   candidate scoring, rollout buffer, and PPO update flow.
@@ -52,7 +52,7 @@ big2-rust/
   src/                  Rust rules/env/vectorized env/PyO3 binding
   tests/                Rust tests for catalog, rules, env, observations, vec env
 
-big2/training/rust_ppo/
+big2/training/big2_v2/
   env_adapter.py         PyO3 batch -> Torch tensors
   metadata.py            Python view of Rust move metadata/features
   model.py               Rust-native candidate actor-critic

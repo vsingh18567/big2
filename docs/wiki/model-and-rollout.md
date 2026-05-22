@@ -1,13 +1,13 @@
 # Model and Rollout
 
 This page documents the Python model, rollout collection, and PPO update for
-the Rust-backed PPO subsystem. Rust provides observations, legal candidates,
+the Big2 v2 PPO subsystem. Rust provides observations, legal candidates,
 move IDs, move features, vectorized stepping, and terminal rewards. Python
 should only choose among Rust-provided candidates and optimize the Torch model.
 
 ## Actor-Critic Model
 
-`RustCandidateActorCritic` scores the legal candidate slots for each Rust batch
+`Big2V2ActorCritic` scores the legal candidate slots for each Rust batch
 row. It combines:
 
 - `obs`: Rust observation tensor, shape `[batch, obs_dim]`;
@@ -51,7 +51,7 @@ samples a controller from the opponent mix:
 | `greedy` | Prefer the lowest metadata-ranked non-pass move. |
 | `smart` | Use simple metadata and observation heuristics for finishing, passing on strong active hands, and conserving high cards. |
 
-Only learner-controlled turns become `RustRolloutRecord`s. Each record stores
+Only learner-controlled turns become `Big2V2RolloutRecord`s. Each record stores
 the environment index, acting player, observation, candidates, selected slot,
 selected move ID, old log probability, value estimate, reward, and done flag.
 
@@ -105,7 +105,7 @@ state transitions should remain Rust responsibilities.
 
 ## Tests
 
-`big2/training/rust_ppo/tests/test_rust_ppo.py` covers the Python subsystem's
+`big2/training/big2_v2/tests/test_big2_v2.py` covers the Python subsystem's
 main contracts:
 
 - adapter tensor shapes and metadata availability;
